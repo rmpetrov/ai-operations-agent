@@ -61,9 +61,26 @@ explicitly local `.env.example` and `docker-compose.yml` examples.
 | POST | `/api/v1/tickets` | Create a support ticket |
 | PATCH | `/api/v1/tickets/{id}/status` | Advance ticket status |
 | GET | `/api/v1/queues/{id}/metrics` | Current queue backlog / SLA breach metric |
+| GET | `/api/v1/queues/{queue_id}/tickets-by-priority` | Active ticket counts by priority |
 
 Status transitions: `open -> in_progress -> resolved`, with `open -> resolved` also allowed.
 Resolved tickets are terminal in this starter.
+
+`GET /api/v1/queues/{queue_id}/tickets-by-priority` counts only `open` and
+`in_progress` tickets in the requested queue, grouped by priority in SQL.
+Resolved tickets are excluded. The response always includes nonnegative integer
+counts for `low`, `normal`, and `high`, including zeros:
+
+```json
+{
+  "queue_id": 1,
+  "counts": {"low": 0, "normal": 1, "high": 1}
+}
+```
+
+An existing queue with no active tickets returns HTTP 200 with all three counts
+set to zero. A nonexistent queue returns HTTP 404 with `{"detail":"queue not found"}`;
+a path ID that cannot be parsed as an integer returns HTTP 422.
 
 Example ticket creation:
 
