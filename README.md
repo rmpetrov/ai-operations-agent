@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 1 starter. Local development only; no LLM, no authentication, no public deployment.
+> **Status:** Sprint 2 — deterministic queue risk assessment. Local development only; no LLM, no authentication, no public deployment.
 
 ## Tech stack
 
@@ -34,6 +34,7 @@ Open http://127.0.0.1:8000/docs for Swagger UI, or try:
 curl http://127.0.0.1:8000/health/ready
 curl http://127.0.0.1:8000/api/v1/queues
 curl http://127.0.0.1:8000/api/v1/queues/1/metrics
+curl http://127.0.0.1:8000/api/v1/queues/1/risk-assessment
 curl 'http://127.0.0.1:8000/api/v1/tickets?queue_id=1&status=open&limit=5'
 ```
 
@@ -61,6 +62,7 @@ explicitly local `.env.example` and `docker-compose.yml` examples.
 | PATCH | `/api/v1/tickets/{id}/status` | Advance ticket status |
 | GET | `/api/v1/queues/{id}/metrics` | Current queue backlog / SLA breach metric |
 | GET | `/api/v1/queues/{queue_id}/tickets-by-priority` | Active ticket counts by priority |
+| GET | `/api/v1/queues/{queue_id}/risk-assessment` | Read-only queue facts and deterministic risk signals |
 
 Status transitions: `open -> in_progress -> resolved`, with `open -> resolved` also allowed.
 Resolved tickets are terminal in this starter.
@@ -89,6 +91,85 @@ curl -i -X POST http://127.0.0.1:8000/api/v1/tickets \
   -d '{"external_id":"DEMO-101","subject":"Login issue","queue_id":1,"priority":"high"}'
 ```
 
+## Queue risk assessment
+
+`GET /api/v1/queues/{queue_id}/risk-assessment` uses one server-controlled UTC
+`evaluated_at` timestamp. A hypothetical 30-minute queue can return:
+
+```json
+{
+  "queue_id": 1,
+  "queue_name": "Billing",
+  "evaluated_at": "2026-10-31T16:00:00Z",
+  "sla_minutes": 30,
+  "policy": {
+    "version": "queue-risk-v1",
+    "sla_at_risk_remaining_percent": 20,
+    "sla_at_risk_window_seconds": 360,
+    "unassigned_backlog_min_tickets": 1
+  },
+  "metrics": {
+    "active_tickets": 2,
+    "unassigned_tickets": 1,
+    "sla_breached_tickets": 1,
+    "sla_at_risk_tickets": 1,
+    "online_agents": 0,
+    "future_created_active_tickets": 0
+  },
+  "overall_severity": "high",
+  "signals": [
+    {"code": "SLA_BREACHED", "severity": "high", "affected_tickets": 1,
+     "reason": "1 active ticket is past its SLA deadline."},
+    {"code": "SLA_AT_RISK", "severity": "medium", "affected_tickets": 1,
+     "reason": "1 active ticket is due now or within 360 seconds."},
+    {"code": "UNASSIGNED_BACKLOG", "severity": "low", "affected_tickets": 1,
+     "reason": "1 active ticket has no assigned agent."},
+    {"code": "NO_AGENTS_ONLINE", "severity": "medium", "affected_tickets": 2,
+     "reason": "No agents are recorded online for this queue's 2 active tickets."}
+  ]
+}
+```
+
+Only `open` and `in_progress` tickets in the requested queue count as active.
+A deadline is `created_at + queue.sla_minutes` in elapsed time. Rules run in this fixed order:
+
+| Signal | Trigger | Severity |
+|---|---|---|
+| `SLA_BREACHED` | At least one active deadline strictly before `evaluated_at` | `high` |
+| `SLA_AT_RISK` | At least one active deadline in the inclusive interval from `evaluated_at` to `evaluated_at + warning window` | `medium` |
+| `UNASSIGNED_BACKLOG` | Unassigned active tickets meet or exceed the configured minimum | `low` |
+| `NO_AGENTS_ONLINE` | Positive active backlog and zero agents recorded online in this queue | `medium` |
+
+The deadline instant is at risk; a deadline one microsecond earlier is breached.
+Future-created active tickets count toward backlog and unassigned counts, appear separately
+in `future_created_active_tickets`, and are excluded from both SLA buckets. Resolved tickets
+are excluded from every ticket count. Signals can overlap: do not sum affected counts.
+An assigned ticket remains assigned even if its agent is offline.
+
+Configure thresholds through environment variables or the local `.env` file:
+
+| Variable | Default | Accepted values |
+|---|---|---|
+| `RISK_SLA_REMAINING_PERCENT` | `20` | Integer 1–99; final percentage of the queue SLA |
+| `RISK_UNASSIGNED_MIN_TICKETS` | `1` | Integer ≥ 1 |
+
+Invalid settings fail application startup. The warning window uses exact duration arithmetic:
+20% of 30 minutes is 360 seconds; 1% of one minute is 0.6 seconds. Every response includes
+the effective thresholds and window. Severities and the other two trigger thresholds are fixed.
+
+Overall severity is the maximum triggered level: `none < low < medium < high`.
+Multiple medium signals remain medium. Empty and resolved-only queues return no signals
+and severity `none`, retaining the actual online-agent count. `none` means no rule triggered.
+Unknown integer queue IDs (including zero and negative IDs) return 404; malformed IDs return 422.
+Database errors return 503 with `{"detail":"database unavailable"}`, without fabricated counts.
+
+This is deadline proximity and observed backlog, without a risk score, probability, forecast,
+or staffing recommendation. Recorded presence has no freshness timestamp. SLA policy has no
+business hours, pauses, or priority weighting; changing the queue SLA reclassifies existing
+tickets. Assessments are not persisted for historical replay. Ticket/agent counts share one
+SQL statement snapshot; the earlier queue lookup is separate, so `evaluated_at` does not
+promise an atomic historical snapshot. See [architecture notes](docs/ARCHITECTURE.md).
+
 ## Tests and quality checks
 
 ```bash
@@ -97,7 +178,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API and Feature 001 tests against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001, and Feature 002 tests against migrated PostgreSQL 16**. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:
