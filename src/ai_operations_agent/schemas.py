@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from ai_operations_agent.risk import Severity, SignalCode, SignalSeverity
 
@@ -112,3 +112,93 @@ class QueueRiskAssessment(BaseModel):
     metrics: RiskAssessmentMetrics
     overall_severity: Severity
     signals: list[RiskAssessmentSignal]
+
+
+class RecommendationValue(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class OverdueEvidence(RecommendationValue):
+    sla_breached_tickets: StrictInt = Field(gt=0)
+
+
+class UpcomingDeadlineEvidence(RecommendationValue):
+    sla_at_risk_tickets: StrictInt = Field(gt=0)
+    sla_at_risk_window_seconds: float = Field(gt=0, allow_inf_nan=False)
+
+
+class RecordedAgentStatusEvidence(RecommendationValue):
+    active_tickets: StrictInt = Field(gt=0)
+    online_agents: StrictInt = Field(ge=0, le=0)
+
+
+class UnassignedEvidence(RecommendationValue):
+    unassigned_tickets: StrictInt = Field(gt=0)
+    unassigned_backlog_min_tickets: StrictInt = Field(ge=1)
+
+
+class RecommendationBase(RecommendationValue):
+    suggested_action: str = Field(min_length=1)
+    explanation: str = Field(min_length=1)
+
+
+class ReviewOverdueTickets(RecommendationBase):
+    code: Literal["REVIEW_OVERDUE_TICKETS"] = "REVIEW_OVERDUE_TICKETS"
+    priority: Literal["high"] = "high"
+    triggered_by_signals: tuple[Literal["SLA_BREACHED"]] = ("SLA_BREACHED",)
+    evidence: OverdueEvidence
+
+
+class ReviewUpcomingDeadlines(RecommendationBase):
+    code: Literal["REVIEW_UPCOMING_DEADLINES"] = "REVIEW_UPCOMING_DEADLINES"
+    priority: Literal["medium"] = "medium"
+    triggered_by_signals: tuple[Literal["SLA_AT_RISK"]] = ("SLA_AT_RISK",)
+    evidence: UpcomingDeadlineEvidence
+
+
+class VerifyRecordedAgentStatus(RecommendationBase):
+    code: Literal["VERIFY_RECORDED_AGENT_STATUS"] = "VERIFY_RECORDED_AGENT_STATUS"
+    priority: Literal["medium"] = "medium"
+    triggered_by_signals: tuple[Literal["NO_AGENTS_ONLINE"]] = ("NO_AGENTS_ONLINE",)
+    evidence: RecordedAgentStatusEvidence
+
+
+class TriageUnassignedTickets(RecommendationBase):
+    code: Literal["TRIAGE_UNASSIGNED_TICKETS"] = "TRIAGE_UNASSIGNED_TICKETS"
+    priority: Literal["low"] = "low"
+    triggered_by_signals: tuple[Literal["UNASSIGNED_BACKLOG"]] = ("UNASSIGNED_BACKLOG",)
+    evidence: UnassignedEvidence
+
+
+ActionRecommendation = Annotated[
+    ReviewOverdueTickets | ReviewUpcomingDeadlines | VerifyRecordedAgentStatus
+    | TriageUnassignedTickets,
+    Field(discriminator="code"),
+]
+
+
+class QueueRecommendations(RecommendationValue):
+    recommendation_policy_version: Literal["queue-recommendations-v1"] = "queue-recommendations-v1"
+    advisory_only: Literal[True] = True
+    requires_human_review: Literal[True] = True
+    assessment: QueueRiskAssessment
+    recommendations: list[ActionRecommendation] = Field(max_length=4)
+
+    @model_validator(mode="after")
+    def validate_traceability(self):
+        signals = {signal.code for signal in self.assessment.signals}
+        codes = [item.code for item in self.recommendations]
+        if len(codes) != len(set(codes)):
+            raise ValueError("recommendation codes must be unique")
+        for item in self.recommendations:
+            if not set(item.triggered_by_signals) <= signals:
+                raise ValueError("recommendation trigger must appear in assessment signals")
+            for name, value in item.evidence.model_dump().items():
+                source = (
+                    self.assessment.metrics
+                    if name in RiskAssessmentMetrics.model_fields
+                    else self.assessment.policy
+                )
+                if value != getattr(source, name):
+                    raise ValueError(f"recommendation evidence {name} must match assessment")
+        return self
