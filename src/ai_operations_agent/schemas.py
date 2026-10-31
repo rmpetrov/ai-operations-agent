@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+
+from ai_operations_agent.risk import Severity, SignalCode, SignalSeverity
 
 TicketStatus = Literal["open", "in_progress", "resolved"]
 TicketPriority = Literal["low", "normal", "high"]
@@ -74,3 +76,39 @@ class TicketPriorityCounts(BaseModel):
 class QueueTicketPriorityBreakdown(BaseModel):
     queue_id: int
     counts: TicketPriorityCounts
+
+
+class RiskAssessmentMetrics(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    active_tickets: int = Field(ge=0)
+    unassigned_tickets: int = Field(ge=0)
+    sla_breached_tickets: int = Field(ge=0)
+    sla_at_risk_tickets: int = Field(ge=0)
+    online_agents: int = Field(ge=0)
+    future_created_active_tickets: int = Field(ge=0)
+
+
+class RiskAssessmentPolicy(BaseModel):
+    version: Literal["queue-risk-v1"]
+    sla_at_risk_remaining_percent: int = Field(ge=1, le=99)
+    sla_at_risk_window_seconds: float = Field(gt=0, allow_inf_nan=False)
+    unassigned_backlog_min_tickets: int = Field(ge=1)
+
+
+class RiskAssessmentSignal(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    code: SignalCode
+    severity: SignalSeverity
+    affected_tickets: int = Field(gt=0)
+    reason: str
+
+
+class QueueRiskAssessment(BaseModel):
+    queue_id: int
+    queue_name: str
+    evaluated_at: AwareDatetime
+    sla_minutes: int = Field(gt=0)
+    policy: RiskAssessmentPolicy
+    metrics: RiskAssessmentMetrics
+    overall_severity: Severity
+    signals: list[RiskAssessmentSignal]

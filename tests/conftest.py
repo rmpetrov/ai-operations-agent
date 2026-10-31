@@ -12,6 +12,7 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from ai_operations_agent.clock import get_evaluation_time
 from ai_operations_agent.config import settings
 from ai_operations_agent.db import get_session
 from ai_operations_agent.main import app
@@ -134,3 +135,10 @@ def client(session: Session) -> Iterator[TestClient]:
             yield client
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def evaluation_time(monkeypatch) -> datetime:
+    now = datetime(2026, 10, 31, 16, 0, 0, 123456, tzinfo=timezone.utc)
+    monkeypatch.setitem(app.dependency_overrides, get_evaluation_time, lambda: now)
+    return now

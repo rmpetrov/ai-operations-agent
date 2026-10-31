@@ -72,3 +72,31 @@ def test_api_startup_requires_explicit_database_configuration(monkeypatch, tmp_p
     assert result.returncode != 0
     assert "database_url" in result.stderr
     assert "Field required" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("risk_sla_remaining_percent", value) for value in (0, 100, -1, 20.5, True, "bad")]
+    + [("risk_unassigned_min_tickets", value) for value in (0, -1, 1.5, True, "bad")],
+)
+def test_invalid_risk_configuration(field, value):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(_env_file=None, database_url="postgresql+psycopg://config.invalid/ops",
+                 **{field: value})
+    assert exc_info.value.errors()[0]["loc"] == (field,)
+
+
+def test_risk_configuration_from_environment(monkeypatch):
+    monkeypatch.setenv("RISK_SLA_REMAINING_PERCENT", "35")
+    monkeypatch.setenv("RISK_UNASSIGNED_MIN_TICKETS", "3")
+    configured = Settings(_env_file=None, database_url="postgresql+psycopg://config.invalid/ops")
+    assert configured.risk_sla_remaining_percent == 35
+    assert configured.risk_unassigned_min_tickets == 3
+
+
+def test_default_risk_configuration(monkeypatch):
+    monkeypatch.delenv("RISK_SLA_REMAINING_PERCENT", raising=False)
+    monkeypatch.delenv("RISK_UNASSIGNED_MIN_TICKETS", raising=False)
+    configured = Settings(_env_file=None, database_url="postgresql+psycopg://config.invalid/ops")
+    assert configured.risk_sla_remaining_percent == 20
+    assert configured.risk_unassigned_min_tickets == 1

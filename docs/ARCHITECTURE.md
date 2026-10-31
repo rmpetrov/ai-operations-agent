@@ -46,6 +46,81 @@ PostgreSQL 16 (schema owned by Alembic)
 It is **not** an SLA risk prediction, first-response SLA, business-hours SLA, or historical SLA
 compliance metric. These require a richer data model and a policy definition in later milestones.
 
+## Queue risk assessment (Sprint 2 / Feature 002)
+
+`GET /api/v1/queues/{queue_id}/risk-assessment` adds three responsibilities:
+
+1. `metrics.py` reads queue identity/SLA and then executes one SQL aggregate statement.
+   Conditional ticket counts and an independent scalar online-agent count avoid join
+   multiplication. It returns immutable facts and does not flush or commit; autoflush
+   is disabled during collection. Tickets are never loaded individually for assessment.
+2. `risk.py` contains immutable policy, facts, and evaluation values plus pure signal rules.
+   It has no FastAPI, SQLAlchemy, clock access, or I/O. Identical facts, policy, and warning
+   duration always produce identical ordered signals and maximum severity.
+3. `main.py` injects the session, validated policy, and `clock.py` evaluation dependency,
+   normalizes that single aware timestamp to UTC, maps missing queues to 404 and database
+   failures to sanitized 503, and validates dedicated Pydantic response models in `schemas.py`.
+   Noninteger path IDs return 422; zero/negative unknown integer IDs return 404.
+
+There are no internal HTTP requests, schema changes, migrations, new dependencies, writes,
+notifications, autonomous actions, scores, forecasts, staffing recommendations, or LLM calls.
+The existing metrics endpoint retains its contract.
+
+### Policy and business rules
+
+Active means `open` or `in_progress` in the requested queue. Let `T` be the evaluation time,
+`S` be its current SLA duration, `D = created_at + S`, and `W = S × remaining_percent / 100`.
+Integer microsecond duration arithmetic preserves fractional-second windows. Comparing
+`created_at` against UTC cutoffs in SQL avoids database-specific timestamp arithmetic and
+maintains the same microsecond boundaries in SQLite and PostgreSQL.
+
+| Ordered signal | Exact trigger | Severity | Affected count |
+|---|---|---|---|
+| `SLA_BREACHED` | At least one nonfuture active ticket with `D < T` | `high` | Breached tickets |
+| `SLA_AT_RISK` | At least one nonfuture active ticket with `T ≤ D ≤ T + W` | `medium` | At-risk tickets |
+| `UNASSIGNED_BACKLOG` | Null-assignment active count ≥ configured minimum | `low` | Unassigned tickets |
+| `NO_AGENTS_ONLINE` | Active count > 0 and recorded online-agent count = 0 in this queue | `medium` | All active tickets |
+
+`D = T` is at risk, not breached. SLA buckets are disjoint. A ticket created after `T`
+is included in active and (if null-assigned) unassigned backlog, counted separately in
+`future_created_active_tickets`, and excluded from both SLA buckets. Resolved tickets are
+excluded from all ticket counts. Agent presence depends only on recorded queue and status.
+Assignment means a nonnull agent ID, including offline agents; cross-queue assignment integrity
+remains the existing API's responsibility.
+
+`config.py` validates `RISK_SLA_REMAINING_PERCENT` (integer 1–99, default 20) and
+`RISK_UNASSIGNED_MIN_TICKETS` (integer ≥ 1, default 1) at startup. The immutable policy
+also validates its inputs. The defaults expose the final fifth of the SLA and any assignment
+gap; these are starting policy choices without empirical handling-time calibration.
+
+Every response includes policy version `queue-risk-v1`, the remaining percentage, effective
+warning window in seconds, and minimum unassigned count. Signal severities are fixed.
+Overall severity is `max(signals)` under `none < low < medium < high`; multiple medium
+signals remain medium. Empty/resolved-only queues produce no signals and severity `none`,
+while retaining their online-agent count. Overlapping affected counts must not be summed.
+The response contract and example are in the [README](../README.md#queue-risk-assessment).
+
+### Time, consistency, testing, and limitations
+
+The injected clock is captured once per request and passed explicitly through collection;
+naive internal times are rejected. Tests override it with a fixed UTC value and scope overrides
+with pytest cleanup. SQLite fixtures persist UTC because SQLite drops stored timezone offsets;
+PostgreSQL tests additionally verify aware offset timestamps across a daylight-saving fallback.
+The same API assertions and exact counts run against both database paths. Tests cover
+microsecond deadline/window edges, fractional-second policies, error sanitization, and SELECT-only
+collection with no explicit or implicit flush/commit, including a pending dirty ORM object.
+
+Ticket and agent aggregates share one statement snapshot. Queue/SLA lookup is a separate
+statement under PostgreSQL Read Committed, so a concurrent SLA change or queue deletion can
+race with collection. A fixed evaluation clock does not provide an atomic historical view.
+There is no persisted assessment or replay log. Determinism requires identical facts and policy.
+
+Severity expresses rule priority, not outage impact or a probability of missed resolution.
+Agent presence has no freshness timestamp and cannot establish capacity. Deadlines use the
+current queue SLA; business calendars, pauses, ticket priority, and historical effective policy
+are absent. Future-created counts expose one data-quality issue without proving other data
+valid. `none` means no configured rule triggered, without a guarantee of operational health.
+
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.
