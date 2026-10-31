@@ -15,5 +15,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  db_test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ops
+      POSTGRES_DB: ai_operations_test
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops -d ai_operations_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 volumes:
   postgres_data:
+  postgres_test_data:
