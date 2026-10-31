@@ -63,3 +63,14 @@ class QueueMetrics(BaseModel):
     sla_breached_tickets: int
     online_agents: int
     calculated_at: datetime
+
+
+class TicketPriorityCounts(BaseModel):
+    low: int = Field(ge=0)
+    normal: int = Field(ge=0)
+    high: int = Field(ge=0)
+
+
+class QueueTicketPriorityBreakdown(BaseModel):
+    queue_id: int
+    counts: TicketPriorityCounts

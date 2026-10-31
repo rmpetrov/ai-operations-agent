@@ -14,8 +14,10 @@ from ai_operations_agent.schemas import (
     AgentStatus,
     QueueMetrics,
     QueueRead,
+    QueueTicketPriorityBreakdown,
     TicketCreate,
     TicketPriority,
+    TicketPriorityCounts,
     TicketRead,
     TicketsPage,
     TicketStatus,
@@ -125,6 +127,26 @@ def update_ticket_status(ticket_id: int, payload: TicketUpdateStatus, db: DB) ->
     db.commit()
     db.refresh(ticket)
     return ticket
+
+
+@app.get(
+    "/api/v1/queues/{queue_id}/tickets-by-priority",
+    response_model=QueueTicketPriorityBreakdown,
+)
+def tickets_by_priority(queue_id: int, db: DB) -> QueueTicketPriorityBreakdown:
+    if db.get(SupportQueue, queue_id) is None:
+        raise HTTPException(status_code=404, detail="queue not found")
+    stmt = (
+        select(Ticket.priority, func.count(Ticket.id))
+        .where(Ticket.queue_id == queue_id, Ticket.status.in_(["open", "in_progress"]))
+        .group_by(Ticket.priority)
+    )
+    counts = {"low": 0, "normal": 0, "high": 0}
+    for priority, count in db.execute(stmt):
+        counts[priority] = count
+    return QueueTicketPriorityBreakdown(
+        queue_id=queue_id, counts=TicketPriorityCounts(**counts)
+    )
 
 
 @app.get("/api/v1/queues/{queue_id}/metrics", response_model=QueueMetrics)

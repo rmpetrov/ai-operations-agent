@@ -38,8 +38,7 @@ curl 'http://127.0.0.1:8000/api/v1/tickets?queue_id=1&status=open&limit=5'
 ```
 
 Sample data: **3 queues, 12 agents, 90 tickets**. Seeding a second time is non-destructive
-and prints a skip message. To completely reset *local* data (DESTRUCTIVE):
-`docker compose down -v`, then recreate the service and repeat migrations + seed.
+and prints a skip message. Keep development data and test data in their separate volumes.
 
 Port 5433 is used on the Mac to avoid colliding with a PostgreSQL server on 5432.
 
@@ -61,9 +60,26 @@ explicitly local `.env.example` and `docker-compose.yml` examples.
 | POST | `/api/v1/tickets` | Create a support ticket |
 | PATCH | `/api/v1/tickets/{id}/status` | Advance ticket status |
 | GET | `/api/v1/queues/{id}/metrics` | Current queue backlog / SLA breach metric |
+| GET | `/api/v1/queues/{queue_id}/tickets-by-priority` | Active ticket counts by priority |
 
 Status transitions: `open -> in_progress -> resolved`, with `open -> resolved` also allowed.
 Resolved tickets are terminal in this starter.
+
+`GET /api/v1/queues/{queue_id}/tickets-by-priority` counts only `open` and
+`in_progress` tickets in the requested queue, grouped by priority in SQL.
+Resolved tickets are excluded. The response always includes nonnegative integer
+counts for `low`, `normal`, and `high`, including zeros:
+
+```json
+{
+  "queue_id": 1,
+  "counts": {"low": 0, "normal": 1, "high": 1}
+}
+```
+
+An existing queue with no active tickets returns HTTP 200 with all three counts
+set to zero. A nonexistent queue returns HTTP 404 with `{"detail":"queue not found"}`;
+a path ID that cannot be parsed as an integer returns HTTP 422.
 
 Example ticket creation:
 
@@ -76,20 +92,50 @@ curl -i -X POST http://127.0.0.1:8000/api/v1/tickets \
 ## Tests and quality checks
 
 ```bash
-pytest -q               # quick tests use isolated in-memory SQLite by default
-ruff check .
+env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
+.venv/bin/python -m ruff check .
+git diff --check
 ```
 
-Run the **same tests against migrated PostgreSQL** (uses transactions/savepoints and rolls
-back each test; use a dedicated disposable development database for safety):
+Run the **same API and Feature 001 tests against migrated PostgreSQL 16**. The `db_test`
+service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
+in `postgres_test_data`, independently of the development `db` service on port 5433.
+From the repository root:
 
 ```bash
-TEST_DATABASE_URL="$DATABASE_URL" pytest -q
+docker compose up -d --wait db_test
+# Read only the explicitly local test URL from the tracked example, without sourcing .env.
+export TEST_DATABASE_URL="$(sed -n 's/^TEST_DATABASE_URL=//p' .env.example)"
+# DATABASE_URL is overridden only for this migration process; .env stays unchanged.
+DATABASE_URL="$TEST_DATABASE_URL" .venv/bin/python -m alembic upgrade head
+.venv/bin/python -m pytest -q
 ```
 
-Important: the shell must export `DATABASE_URL` for the command above, e.g.
-`export DATABASE_URL="$(sed -n 's/^DATABASE_URL=//p' .env.example)"`.
-The GitHub Actions workflow runs Alembic + seed + integration tests against PostgreSQL.
+Never copy the development `DATABASE_URL` into `TEST_DATABASE_URL`. Before opening a
+connection or creating fixtures, pytest requires a PostgreSQL URL with an explicit host,
+a database name ending in `_test`, and a database name different from the configured
+development database. Connection query parameters are rejected because they can override
+the target. Empty or invalid values fail immediately; unset the variable to use SQLite.
+
+PostgreSQL tests use an outer transaction and savepoints so API commits and rollbacks,
+including status transitions, stay isolated and are rolled back after each test. Fixtures
+create their own data; do not seed the test database. PostgreSQL sequences can advance
+despite rollback, so tests do not depend on fixed IDs. Tests never create or drop PostgreSQL
+tables; Alembic owns the schema. Run one test process at a time against this database.
+CI generates fresh credentials for its own temporary PostgreSQL 16 container, with a
+loopback-only dynamic port and memory-backed storage. It migrates only that test database,
+runs the integration suite, and removes the container on completion, including failures.
+CI does not reuse the local example credentials or development database configuration.
+
+Return to normal SQLite tests and optionally stop only the test service:
+
+```bash
+unset TEST_DATABASE_URL
+.venv/bin/python -m pytest -q
+docker compose stop db_test
+```
+
+Stopping the test service preserves both volumes. Do not remove volumes to switch test modes.
 
 ## Learning plan
 
