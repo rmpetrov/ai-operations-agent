@@ -11,7 +11,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ai_operations_agent import assessment as assessment_module
-from ai_operations_agent import main as main_module
+from ai_operations_agent import queue_services
 from ai_operations_agent.clock import get_evaluation_time
 from ai_operations_agent.config import get_risk_policy
 from ai_operations_agent.db import get_session
@@ -266,7 +266,7 @@ def test_one_pipeline_and_same_clock_policy_and_facts(client, session, recommend
     with (
         patch.object(assessment_module, "collect_queue_risk_metrics", wraps=assessment_module.collect_queue_risk_metrics) as collector,
         patch.object(assessment_module, "evaluate_risk", wraps=assessment_module.evaluate_risk) as evaluator,
-        patch.object(main_module, "build_recommendations", wraps=main_module.build_recommendations) as builder,
+        patch.object(queue_services, "build_recommendations", wraps=queue_services.build_recommendations) as builder,
     ):
         clock_calls, policy_calls = [], []
 

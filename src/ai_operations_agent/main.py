@@ -6,13 +6,13 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from ai_operations_agent.assessment import QueueAssessmentContext, assess_queue
+from ai_operations_agent import queue_services
+from ai_operations_agent.assessment import QueueAssessmentContext
 from ai_operations_agent.clock import get_evaluation_time
 from ai_operations_agent.config import get_risk_policy
 from ai_operations_agent.db import get_session
 from ai_operations_agent.models import Agent, Ticket
 from ai_operations_agent.models import Queue as SupportQueue
-from ai_operations_agent.recommendations import build_recommendations
 from ai_operations_agent.risk import RiskPolicy
 from ai_operations_agent.schemas import (
     AgentRead,
@@ -22,9 +22,6 @@ from ai_operations_agent.schemas import (
     QueueRecommendations,
     QueueRiskAssessment,
     QueueTicketPriorityBreakdown,
-    RiskAssessmentMetrics,
-    RiskAssessmentPolicy,
-    RiskAssessmentSignal,
     TicketCreate,
     TicketPriority,
     TicketPriorityCounts,
@@ -53,8 +50,8 @@ def readiness(db: DB) -> dict[str, str]:
 
 
 @app.get("/api/v1/queues", response_model=list[QueueRead])
-def list_queues(db: DB) -> list[SupportQueue]:
-    return list(db.scalars(select(SupportQueue).order_by(SupportQueue.id)).all())
+def list_queues(db: DB) -> list[QueueRead]:
+    return queue_services.list_queues(db)
 
 
 @app.get("/api/v1/agents", response_model=list[AgentRead])
@@ -194,7 +191,7 @@ def get_queue_assessment(
     policy: Annotated[RiskPolicy, Depends(get_risk_policy)],
 ) -> QueueAssessmentContext:
     try:
-        context = assess_queue(db, queue_id, evaluated_at, policy)
+        context = queue_services.assess_queue(db, queue_id, evaluated_at, policy)
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=503, detail="database unavailable") from exc
     if context is None:
@@ -205,36 +202,11 @@ def get_queue_assessment(
 Assessment = Annotated[QueueAssessmentContext, Depends(get_queue_assessment)]
 
 
-def risk_assessment_response(context: QueueAssessmentContext) -> QueueRiskAssessment:
-    facts, policy, evaluation = context.facts, context.policy, context.evaluation
-    return QueueRiskAssessment(
-        queue_id=facts.queue_id,
-        queue_name=facts.queue_name,
-        evaluated_at=context.evaluated_at,
-        sla_minutes=facts.sla_minutes,
-        policy=RiskAssessmentPolicy(
-            version="queue-risk-v1",
-            sla_at_risk_remaining_percent=policy.sla_remaining_percent,
-            sla_at_risk_window_seconds=facts.warning_window_seconds,
-            unassigned_backlog_min_tickets=policy.unassigned_min_tickets,
-        ),
-        metrics=RiskAssessmentMetrics.model_validate(facts.metrics),
-        overall_severity=evaluation.overall_severity,
-        signals=[RiskAssessmentSignal.model_validate(signal) for signal in evaluation.signals],
-    )
-
-
 @app.get("/api/v1/queues/{queue_id}/risk-assessment", response_model=QueueRiskAssessment)
 def queue_risk_assessment(context: Assessment) -> QueueRiskAssessment:
-    return risk_assessment_response(context)
+    return queue_services.risk_assessment_response(context)
 
 
 @app.get("/api/v1/queues/{queue_id}/recommendations", response_model=QueueRecommendations)
 def queue_recommendations(context: Assessment) -> QueueRecommendations:
-    return QueueRecommendations(
-        assessment=risk_assessment_response(context),
-        recommendations=list(build_recommendations(
-            context.facts.metrics, context.policy, context.facts.warning_window_seconds,
-            context.evaluation,
-        )),
-    )
+    return queue_services.recommendations_response(context)

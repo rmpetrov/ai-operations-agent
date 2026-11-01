@@ -100,3 +100,13 @@ def test_seed_skips_existing_queues(session):
     from ai_operations_agent.seed import seed
 
     assert seed(session) is False
+
+
+def test_queue_listing_exact_response_contract(client, session):
+    expected = [
+        {"id": queue.id, "name": queue.name, "sla_minutes": queue.sla_minutes}
+        for queue in session.scalars(select(Queue).order_by(Queue.id))
+    ]
+    response = client.get("/api/v1/queues")
+    assert response.status_code == 200
+    assert response.json() == expected
