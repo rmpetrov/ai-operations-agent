@@ -1,4 +1,4 @@
-# Architecture — first milestone
+# Architecture — deterministic backend and Sprint 4A tools
 
 ## Purpose
 
@@ -58,9 +58,11 @@ compliance metric. These require a richer data model and a policy definition in 
    It has no FastAPI, SQLAlchemy, clock access, or I/O. Identical facts, policy, and warning
    duration always produce identical ordered signals and maximum severity.
 3. `main.py` injects the session, validated policy, and `clock.py` evaluation dependency.
-   Shared orchestration in `assessment.py` normalizes that single aware timestamp to UTC,
+   Shared orchestration in `assessment.py`, exposed by `queue_services.py`, normalizes the
+   single aware timestamp to UTC,
    collects facts once, evaluates risk once, and returns an immutable context. `main.py`
-   maps missing queues to 404 and database failures to sanitized 503, and constructs
+   maps missing queues to 404 and database failures to sanitized 503, and uses
+   HTTP-independent `queue_services.py` builders for
    dedicated Pydantic response models in `schemas.py`.
    Noninteger path IDs return 422; zero/negative unknown integer IDs return 404.
 
@@ -133,7 +135,8 @@ No triggered recommendation means HTTP 200 with an empty list and the full asses
 
 ### Shared pipeline and deterministic catalog
 
-Both routes use the same `main.py` dependency and `assessment.py` orchestration. One
+Both routes use the same `main.py` dependency and `assessment.py` orchestration through
+`queue_services.py`, which also owns their canonical response construction. One
 server-controlled timestamp and one effective `RiskPolicy` produce one `QueueRiskFacts`
 and one `RiskEvaluation`. A frozen context carries these exact values through response
 construction and recommendation generation. There is no second clock/policy lookup,
@@ -209,11 +212,106 @@ calendar, handling estimates, forecasts, historical replay, or atomic historical
 provided. Independent requests can differ, so recommendations must be presented with their
 included assessment. Empty recommendations mean only that no configured rule triggered.
 
+## Scoped read-only tools (Sprint 4A)
+
+This first Sprint 4 implementation adds an internal boundary for future callers. It adds no
+LLM provider, adapter, agent loop, CLI, agent HTTP endpoint, authentication, mutation tool,
+arbitrary SQL, shell, filesystem, or network tool. The local-only HTTP MVP remains unchanged.
+
+### Shared services and contracts
+
+`queue_services.py` owns the deterministic queue listing query and the assessment and
+recommendation response builders extracted from routes. It exposes the existing
+`assessment.py` pipeline and reuses `metrics.py`, `risk.py`, and `recommendations.py`.
+Routes retain their Pydantic schemas and HTTP status/error contracts; write-capable routes
+are unchanged. Tools call services directly, never HTTP endpoints. Recommendation calls
+collect once (queue lookup plus one combined aggregate), evaluate once, and build once
+using a single captured UTC timestamp and effective immutable policy.
+
+`tool_schemas.py` defines strict, extra-forbidden arguments, queue identities, and canonical
+recommendation results. Recommendation result schemas inherit the canonical fields and
+traceability validators, adding strict nested assessment validation. `list_queues` accepts
+only `{}` and returns an ID-ordered array with exactly `id` and `name`. The
+`get_queue_recommendations` tool accepts exactly `{"queue_id": <strict positive integer>}`
+and returns the existing `QueueRecommendations` envelope, including its complete assessment.
+Neither tool loads individual ticket/agent objects or returns ticket identifiers or subjects.
+
+### Server-owned access and execution limits
+
+Only trusted server code constructs the frozen `AccessContext`. It holds explicit immutable
+`allowed_queue_ids`, `allowed_tool_names`, optional `selected_queue_id`, and frozen
+`ExecutionLimits`. Empty/missing queue or tool sets deny access. This is a capability boundary
+for internal calls, not authentication or a safe deserializer for user permissions.
+Questions and tool arguments cannot supply permissions, policy, clocks, or connection targets.
+The only accepted names are `list_queues` and `get_queue_recommendations`; unsupported or
+unpermitted names fail before database access. Strict positive IDs reject boolean, string,
+float, zero, and negative values, and all unexpected argument fields are forbidden.
+
+Discovery includes scope and optional selected-ID predicates in SQL, rather than retrieving
+all rows and filtering in Python. Recommendation authorization occurs before queue lookup.
+When a selected queue exists in the context, calls cannot switch to another queue even
+if it is also allowed. Forbidden selection and nonexistent selection produce the identical
+sanitized `queue unavailable` error; a selected nonexistent queue also fails discovery.
+An unselected discovery with no existing authorized queues returns an empty array.
+
+Arguments are dictionaries or JSON object strings, with duplicate JSON keys rejected,
+bounded before schema validation to
+4,096 UTF-8 bytes by default. Result snapshots default to at most 65,536 bytes and fail
+as a whole if too large. PostgreSQL statement timeout defaults to 5,000 ms. Limits are
+server-configured positive integers; there is no multi-step execution budget or runtime yet.
+Database failures expose only `database unavailable`; validation errors do not echo inputs.
+
+### Transaction ownership and read-only enforcement
+
+`read_only.py` accepts an Engine, never an already active session or connection. Each call
+owns its connection, transaction, and `ReadOnlySession`. Before any business query,
+PostgreSQL explicitly uses Read Committed (including when given an autocommit engine),
+then executes `SET TRANSACTION READ ONLY` and `SET LOCAL statement_timeout`.
+Fixture writes in a separate transaction are never followed by a transaction mode change.
+SQLite enables `PRAGMA query_only` before reads and restores the original connection
+setting on exit, preserving StaticPool in-memory tests. Session autoflush is disabled;
+explicit flush/commit and non-SELECT SQL (including Core DML and raw driver SQL) are rejected.
+The transaction is rolled back and session/connection closed after success or failure. If
+rollback or state restoration itself fails, the connection is invalidated rather than returned
+to the pool with unknown state. Replacing a failed SQLite in-memory connection loses its
+ephemeral database; a file-backed database retains its rows.
+
+Native database rejection is tested by bypassing the Python SQL guard with a DBAPI cursor;
+PostgreSQL returns SQLSTATE `25006`, and SQLite reports a read-only database. Tests also
+verify pending dirty/new ORM values do not flush, database business rows remain unchanged,
+transaction setup precedes business reads, and pooled connections regain their normal mode.
+Existing PostgreSQL outer-transaction/savepoint fixtures are preserved. Separate tool fixtures
+commit unique test rows only in the validated dedicated test database, remove exactly those
+rows afterward, and compare the complete business-row baseline. Sequences may advance.
+
+These are safeguards for fixed internal code, not a sandbox for arbitrary trusted Python
+or user SQL. There is no separate least-privilege database role yet. SQLite's switch is
+connection-wide, so shared in-memory connections must be used sequentially; SQLite has no
+matching statement timeout. PostgreSQL Read Committed lookup/aggregate consistency limitations
+and all existing assessment/recommendation policy limitations still apply.
+
+### Detached results and future evidence
+
+`tools.execute_tool` strictly validates and serializes the result inside the session boundary,
+then returns a fresh request-local JSON snapshot only after the session has closed. Nested
+objects cannot leak live ORM/session state or mutate another invocation. The canonical
+snapshot includes queue identity, timestamp, policy, metrics, signals, and typed recommendation
+evidence, so a later runtime can assign evidence IDs and validate references using that one
+snapshot. No evidence IDs, full ledger, model-generated explanations, historical replay,
+or provider calls are implemented in Sprint 4A.
+
+`AGENTS.md` was reviewed and remains applicable without edits: the milestone is deterministic
+and the prohibition on LLM features still applies. A future approved LLM/runtime milestone
+will need a narrowly scoped update to that restriction and documented authentication/access,
+provider/session boundaries, limits, and human approval for any proposed mutation. Migration,
+credential, local-only, testing, and data-isolation safeguards should remain in force.
+
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.
 - Immutable event log for agent decisions and the actual changes they trigger.
-- Authentication, roles, human approval, per-tool permission checks.
+- Authentication, roles, human approval, and a least-privilege database role.
+- Provider/runtime integration and evidence-ledger reference validation (separate approval).
 - Metrics snapshots / event ingestion from a real external support tool.
 - Observability, retries/idempotency, deployment and threat modeling.
 - Agent planning + evaluations based on deterministic operational facts.

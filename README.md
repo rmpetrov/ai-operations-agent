@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 3 — deterministic advisory action recommendations. Local development only; no LLM, no authentication, no public deployment.
+> **Status:** Sprint 4A — internal scoped read-only tools and shared services. Local development only; no LLM, no agent runtime, no authentication, no public deployment.
 
 ## Tech stack
 
@@ -265,6 +265,66 @@ Presence freshness, business-hour SLA rules, an atomic historical snapshot, and 
 replay remain unavailable. Independent requests may observe different facts; use the included
 assessment when displaying recommendations. Keep this unauthenticated MVP local only.
 
+## Internal read-only tools (Sprint 4A)
+
+Trusted Python server code can call exactly two tools through `tools.execute_tool`:
+
+| Tool | Strict arguments | Detached JSON result |
+|---|---|---|
+| `list_queues` | `{}` | `[{"id": 2, "name": "Billing"}]`, ordered by ID |
+| `get_queue_recommendations` | `{"queue_id": 2}` | The canonical `QueueRecommendations` structure shown above |
+
+These are internal functions; there is no new HTTP endpoint, CLI, provider, model adapter,
+agent loop, or external tool. No API credentials or new dependencies are needed.
+An internal call from trusted server code, using queue IDs authorized by that server:
+
+```python
+from ai_operations_agent.tool_schemas import AccessContext
+from ai_operations_agent.tools import execute_tool
+
+access = AccessContext(
+    allowed_queue_ids=frozenset({2}),
+    allowed_tool_names=frozenset({"list_queues", "get_queue_recommendations"}),
+    selected_queue_id=2,
+)
+queues = execute_tool("list_queues", {}, access)
+recommendations = execute_tool("get_queue_recommendations", {"queue_id": 2}, access)
+```
+
+Do not construct access permissions from a question or tool arguments. `AccessContext` and
+its execution limits are immutable, with immutable queue/tool sets. Missing or empty queue
+scope and missing tool permissions deny access. Discovery filters IDs in SQL; an explicit
+selected queue also narrows discovery and cannot be changed by a recommendation call.
+Forbidden and nonexistent queues return the same `ToolError("queue unavailable")`.
+Unsupported tools and forbidden queue IDs fail before opening a database session.
+
+Arguments accept a Python dictionary or a JSON object string. Extra or duplicate JSON fields and queue IDs
+that are booleans, strings, floats, zero, or negative integers are rejected. Default limits
+are 4,096 UTF-8 argument bytes, 65,536 result bytes, and a 5,000 ms PostgreSQL statement
+timeout. Oversized results fail without returning a partial snapshot. Outputs contain only
+validated queue identity or aggregate recommendation data, with no individual tickets,
+subjects, external IDs, ORM objects, or sessions. Each call returns fresh JSON-compatible
+values after its business session closes; a future runtime can assign evidence IDs to that
+snapshot without re-querying. No evidence ledger or model explanation is implemented.
+
+`queue_services.py` supplies HTTP-independent listing, assessment orchestration, and
+canonical response builders to both routes and tools. Existing HTTP response contracts and
+write endpoints are preserved. Recommendation collection still uses one queue lookup and
+one combined ticket/agent aggregate, one timestamp, one policy, and one risk evaluation.
+
+Tools own short-lived sessions separate from HTTP and write-fixture sessions. PostgreSQL
+sets transaction read-only mode and a local statement timeout before business queries, then
+rolls back and returns the connection on success or failure. SQLite uses `query_only` and
+restores the prior connection setting for in-memory/pool compatibility. Failed rollback or
+state restoration invalidates the connection so it cannot leak unsafe state into the pool.
+Both paths disable autoflush, reject explicit flush/commit and non-SELECT SQL, and leave
+business rows unchanged.
+The guard is for these fixed internal tools, not a sandbox for arbitrary Python or SQL.
+SQLite has no matching statement timeout; its connection-wide switch requires sequential
+use of a shared in-memory connection. PostgreSQL retains the existing Read Committed
+consistency limits between queue lookup and aggregate. No dedicated least-privilege database
+role, user authentication, or public access boundary is introduced here.
+
 ## Tests and quality checks
 
 ```bash
@@ -273,7 +333,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API and Feature 001–003 tests against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001–003, and Sprint 4A tests against migrated PostgreSQL 16**. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:
@@ -297,7 +357,10 @@ PostgreSQL tests use an outer transaction and savepoints so API commits and roll
 including status transitions, stay isolated and are rolled back after each test. Fixtures
 create their own data; do not seed the test database. PostgreSQL sequences can advance
 despite rollback, so tests do not depend on fixed IDs. Tests never create or drop PostgreSQL
-tables; Alembic owns the schema. Run one test process at a time against this database.
+tables; Alembic owns the schema. The Sprint 4A fixtures additionally commit only their own
+uniquely named rows in this dedicated test database so independent read-only transactions can observe them, then delete exactly those
+rows and compare all business rows to the pre-test baseline. They never reconfigure existing
+write-fixture transactions. Run one test process at a time against this database.
 CI generates fresh credentials for its own temporary PostgreSQL 16 container, with a
 loopback-only dynamic port and memory-backed storage. It migrates only that test database,
 runs the integration suite, and removes the container on completion, including failures.
