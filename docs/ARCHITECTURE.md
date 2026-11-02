@@ -1,9 +1,10 @@
-# Architecture — deterministic backend and Sprint 4A tools
+# Architecture — deterministic backend and offline Sprint 4B runtime
 
 ## Purpose
 
 Simulate three customer-support queues and provide a reliable, explainable source of
-operational facts. **No LLM, agent, automation, or irreversible action yet.**
+operational facts. **No live LLM, autonomous writes, automation, or irreversible action.**
+Sprint 4B adds an internal runtime driven only by trusted scripted fake-model outcomes.
 
 ## Context
 
@@ -258,7 +259,8 @@ Arguments are dictionaries or JSON object strings, with duplicate JSON keys reje
 bounded before schema validation to
 4,096 UTF-8 bytes by default. Result snapshots default to at most 65,536 bytes and fail
 as a whole if too large. PostgreSQL statement timeout defaults to 5,000 ms. Limits are
-server-configured positive integers; there is no multi-step execution budget or runtime yet.
+server-configured positive integers. Sprint 4A itself has no multi-step execution budget;
+Sprint 4B layers the bounded runtime below over this dispatcher.
 Database failures expose only `database unavailable`; validation errors do not echo inputs.
 
 ### Transaction ownership and read-only enforcement
@@ -290,28 +292,143 @@ connection-wide, so shared in-memory connections must be used sequentially; SQLi
 matching statement timeout. PostgreSQL Read Committed lookup/aggregate consistency limitations
 and all existing assessment/recommendation policy limitations still apply.
 
-### Detached results and future evidence
+### Detached results
 
 `tools.execute_tool` strictly validates and serializes the result inside the session boundary,
 then returns a fresh request-local JSON snapshot only after the session has closed. Nested
 objects cannot leak live ORM/session state or mutate another invocation. The canonical
 snapshot includes queue identity, timestamp, policy, metrics, signals, and typed recommendation
-evidence, so a later runtime can assign evidence IDs and validate references using that one
-snapshot. No evidence IDs, full ledger, model-generated explanations, historical replay,
-or provider calls are implemented in Sprint 4A.
+evidence. Sprint 4B assigns evidence IDs and validates references using that one snapshot.
+Sprint 4A itself introduces no ledger or explanation; historical replay and provider calls
+remain unimplemented.
 
-`AGENTS.md` was reviewed and remains applicable without edits: the milestone is deterministic
-and the prohibition on LLM features still applies. A future approved LLM/runtime milestone
-will need a narrowly scoped update to that restriction and documented authentication/access,
-provider/session boundaries, limits, and human approval for any proposed mutation. Migration,
-credential, local-only, testing, and data-isolation safeguards should remain in force.
+Sprint 4B narrowly updates `AGENTS.md` to permit this offline runtime and its evaluations.
+Real providers, credentials/live model calls, autonomous writes, and public deployment still
+require separate approval. Migration, credential, local-only, testing, and data-isolation
+safeguards remain in force.
+
+## Offline agent runtime and deterministic evaluations (Sprint 4B)
+
+`agent_schemas.py` defines strict frozen requests, outcomes, draft selections, references,
+limits, and the versioned response. `fake_model.py` defines a narrow synchronous
+`ModelAdapter` protocol and a `FakeModelAdapter` consuming trusted Python scripts.
+`agent_runtime.py` owns all state and tool dispatch. `agent_evidence.py` owns a private
+request-local ledger of serialized detached JSON snapshots. There is no new API route,
+CLI, framework, provider dependency, persistence, migration, secret, or network integration.
+**No live LLM is connected.**
+
+### State transitions and routing boundary
+
+Application code supplies the workflow, never permissions from a question. This is explicit
+structured routing, not a free-text intent classifier. Unsupported forecast/staffing requests
+must be routed as `unsupported`; that state cannot call tools or produce operational advice.
+Model routing accuracy is distinct from server authorization: scripted routing tests demonstrate
+known choices, while scope and selected-queue enforcement protect every actual dispatch.
+
+| Initial workflow | First permitted tool | Next state | Terminal outcome |
+|---|---|---|---|
+| Discovery | `list_queues` | Discovery captured; no more tools | Complete authorized queue list |
+| Selected assessment | `get_queue_recommendations` | Assessment captured; no more tools | Complete canonical recommendations |
+| Named assessment | `list_queues` | Unique authorized name resolved, then `get_queue_recommendations` | Complete canonical recommendations |
+| Unsupported | None | Structured inability only | `unsupported` |
+
+An unselected assessment without a name returns `needs_clarification` without a model or
+database call. After scoped discovery, names use exact stripped/casefolded matching:
+zero matches returns `insufficient_information`, multiple matches `needs_clarification`.
+Only a unique discovered queue can be requested. An explicit server-selected queue always
+wins and cannot change. Even an otherwise authorized queue is rejected if it differs from
+that target. Forbidden and nonexistent selections expose the same `queue unavailable` error.
+Empty/missing scope denies access, and unauthorized queue requests perform zero business
+reads for that queue. Selection never grants a permission absent from `AccessContext`.
+
+Every turn yields exactly one typed `ToolRequest`, `StructuredAnswerDraft`, `Refusal`, or
+`ModelFailure`. A batch is an invalid outcome. The state machine enforces at most **2 tool
+requests and 3 model turns**, no repeated tool or call ID, sequential execution, no switching
+after assessment, and immediate termination on an answer/failure. Limits may be lowered,
+but these ceilings cannot be increased. Invalid outcomes, tool names/arguments, and
+transitions are rejected before dispatch. There are no automatic retries or repair loops.
+
+### Adapter, deadlines, and bounded data
+
+`next_turn(conversation, permitted_tools, response_schema, deadline)` receives copies of
+JSON conversation values, state-filtered permitted tool names, the draft schema, and an
+absolute monotonic deadline. It receives no engine, session, permissions object, or ledger
+capability. The fake consumes constructor-provided outcomes or raises scripted exceptions;
+no user input is parsed as a script. A future Responses adapter can implement this protocol
+only after separate provider approval and cancellation design.
+
+The complete request defaults to 4,096 UTF-8 bytes, a turn to 8,192, and conversation/response
+each to 196,608. Dispatcher argument/result limits remain 4,096/65,536. The default run
+deadline is 10 seconds (maximum configurable 30), checked before/after adapter and tool calls
+and before accepting rendered answers. Expired tool outputs cannot enter the ledger.
+The tool's PostgreSQL statement timeout is capped by remaining monotonic time and the
+existing server-owned statement limit. Clock and ID generation are injectable in tests.
+These are cooperative synchronous checks: arbitrary blocking Python, pool connection waits,
+and SQLite statements cannot be preempted by this runtime. The supplied fake never blocks;
+these evaluations do not establish a hard wall-clock guarantee for a future provider.
+
+### Evidence and rendering
+
+Only successful `execute_tool()` calls feed the ledger; session closure and native read-only
+transactions remain Sprint 4A responsibilities. Runtime code performs no SQL or HTTP calls.
+Discovery uses one scoped SELECT; assessment uses the existing queue lookup and one combined
+business aggregate. No resolution/rendering read or second aggregation is introduced.
+
+The ledger copies complete canonical snapshots into immutable JSON strings, assigns unique
+server IDs, and derives an allowlist of typed pointers: discovery `/<index>` entries,
+`/assessment`, named `/assessment/metrics/<field>` values, and
+`/recommendations/<index>` entries. Sources carry the current run ID. Resolution requires
+the exact source/type/pointer and permitted queue inside that run. The adapter receives
+separate copies; it cannot mutate stored facts. No arbitrary JSON pointers, ticket identities,
+model-authored source content, cross-request sources, persistence, or database re-reads exist.
+
+Drafts select only kind, typed references, canonical codes, fixed block types, and inability
+category. They cannot supply prose or authoritative counts, actions, severities, priorities,
+signals, timestamps, forecasts, identities, or payloads. Queue-focus rendering requires an
+assessment plus all its recommendations in exact canonical order; invented, inactive,
+duplicate, omitted, and reordered codes fail. References must include the full assessment
+and each recommendation in order, with optional valid metrics afterward. Discovery references
+must cover exactly the actual authorized list. The server builds operational prose from fixed
+templates and the canonical snapshots. It never adds affected counts, infers intersections,
+or represents empty recommendations as an operational-health guarantee.
+
+`offline-agent-v1` responses include run/status, three literal safety flags, complete sources,
+resolved evidence, rendered explanation blocks, uncertainty, and sanitized error. Sources and
+resolved evidence intentionally duplicate bounded data for self-contained traceability.
+The strict response validator checks run/source provenance, typed pointer resolution and
+value equality, recommendation-reference completeness/order, and explanation citations.
+The runtime additionally compares response sources/evidence with its private ledger; JSON
+shape alone cannot establish provenance. No approval or execution state is exposed.
+
+Errors have a fixed code/message allowlist; database, adapter, validation, and arbitrary
+exception details are never echoed. Refusal returns structured inability. A failed run may
+retain already successful source snapshots for audit but emits no operational conclusions or
+resolved evidence. Oversized responses fail as a whole without partial/truncated sources.
+All evidence disappears with the run; the response is not a persisted historical replay log.
+
+### Offline evaluations and limitations
+
+`tests/test_offline_agent_evaluations.py` runs full scripted transitions through real tools
+on SQLite and isolated PostgreSQL, including the four workflows, missing/ambiguous/empty
+queues, all four signals and no triggered rules, scope and routing failures, malicious-looking
+questions, malformed outcomes/batches, bad arguments/tools, duplicate IDs/calls, budget and
+size/deadline exhaustion, refusals/exceptions, evidence/code/prose fabrication, sanitization,
+row equality, no flush/commit, closed sessions between turns, and single aggregation.
+These are **offline deterministic evaluations**, not measurements of real-model routing
+accuracy or hallucination frequency. No second model validates grounding.
+
+All existing policy, Read Committed snapshot, aggregate-only, presence-freshness, lack of
+authentication/least-privilege DB role, and local-only limitations remain. Trusted application
+routing and scripts are inside the trust boundary; this is not a sandbox for arbitrary Python.
+Production authentication, live provider cancellation/reliability, free-text intent routing,
+historical persistence, forecasts, and any write/approval workflow remain future scope.
 
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.
 - Immutable event log for agent decisions and the actual changes they trigger.
 - Authentication, roles, human approval, and a least-privilege database role.
-- Provider/runtime integration and evidence-ledger reference validation (separate approval).
+- Live provider integration, intent routing, and cancellation (separate approval).
 - Metrics snapshots / event ingestion from a real external support tool.
 - Observability, retries/idempotency, deployment and threat modeling.
-- Agent planning + evaluations based on deterministic operational facts.
+- Real-model routing/quality evaluations based on deterministic operational facts.
