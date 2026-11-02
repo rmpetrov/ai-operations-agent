@@ -1,8 +1,9 @@
 """Scripted offline model. Scripts are constructed only by trusted Python callers."""
 
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from copy import deepcopy
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from ai_operations_agent.agent_schemas import ModelFailure, ModelTurn
 
@@ -16,6 +17,13 @@ class ModelAdapter(Protocol):
 
         Only detached JSON is passed, never a session, engine, permissions, or ledger.
         """
+        ...
+
+
+@runtime_checkable
+class RunScopedModelAdapter(Protocol):
+    def open_run(self) -> AbstractContextManager[ModelAdapter]:
+        """Optionally give the runtime a private adapter and guaranteed cleanup per run."""
         ...
 
 

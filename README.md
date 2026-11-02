@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4B — offline agent runtime with scripted fake-model evaluations. No live LLM is connected. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4C — opt-in OpenAI Responses adapter, verified through mocked SDK transport only. Live model calls remain unapproved. Local development only; no authentication or public deployment.
 
 ## Tech stack
 
@@ -331,8 +331,9 @@ role, user authentication, or public access boundary is introduced here.
 **No live LLM is connected.** `agent_runtime.run_agent` is an internal synchronous Python
 entry point, with no agent API endpoint or CLI. Trusted application/test code supplies an
 `AgentRequest`, the existing server-owned `AccessContext`, and a `FakeModelAdapter` script.
-Questions cannot carry scripts or permissions. There is no provider SDK, network model
-call, framework, new secret, migration, or autonomous write.
+Questions cannot carry scripts or permissions. The fake adapter needs no provider SDK,
+model network call, or secret. Sprint 4C adds the optional adapter below without changing
+HTTP contracts, migrations, deterministic tools, or rendering.
 
 The application explicitly chooses `discovery`, `queue_assessment`, or `unsupported`.
 This milestone does not classify free-text questions. Application routing must mark
@@ -361,8 +362,8 @@ closes it before the next simulated model turn.
 The adapter contract is `next_turn(conversation, permitted_tools, response_schema, deadline)`.
 It receives detached JSON and an absolute monotonic deadline and returns one `ToolRequest`,
 `StructuredAnswerDraft`, `Refusal`, or `ModelFailure`. `FakeModelAdapter` consumes only a
-trusted Python script. A future live adapter needs separate approval and must honor deadline
-cancellation; none is implemented here.
+trusted Python script. The Sprint 4C adapter implements this contract; live invocations
+still need separate approval. Synchronous deadlines have the limitations below.
 
 Defaults bound the complete request to 4,096 UTF-8 bytes, each model outcome to 8,192 bytes,
 the conversation and response each to 196,608 bytes, and elapsed execution to 10 seconds
@@ -404,6 +405,88 @@ They exercise the real dispatcher on both database backends. They establish scri
 and evidence guarantees; they do **not** measure real-model routing accuracy, hallucination
 frequency, general language understanding, or production readiness.
 
+## OpenAI Responses adapter (Sprint 4C)
+
+`openai_responses.OpenAIResponsesAdapter` is an internal, disabled-by-default transport for
+`run_agent()`. This milestone authorizes implementation and mocked testing only;
+**it does not authorize live model calls**. No agent HTTP endpoint, CLI, provider startup
+dependency, hosted tool, framework, write tool, persistence, or deployment is added.
+
+Install the optional official Python SDK and run provider tests without real credentials:
+
+```bash
+python -m pip install -e ".[dev,openai]"
+env -u TEST_DATABASE_URL python -m pytest -q tests/test_openai_responses.py
+```
+
+The `openai` extra requires `openai>=2.54,<3`, verified with 2.54.0. CI installs the extra;
+tests use `httpx.MockTransport`, block real HTTP transport, and supply only a test sentinel.
+Without the extra, SDK transport tests skip; backend/fake/configuration/import checks remain
+available. No provider SDK or client is loaded by application startup or health checks.
+
+`ResponsesSettings` is frozen and strictly typed, constructed only by trusted local code.
+It does not load `.env` or enable itself from environment variables:
+
+| Setting | Default | Bounds / source |
+|---|---|---|
+| `enabled` | `False` | Explicit trusted-code opt-in; live execution still needs approval |
+| `model_id` | `None` | Explicit nonempty model ID required when enabled; no built-in model |
+| `timeout_seconds` | `10` | Positive, at most 30 seconds; capped by remaining runtime deadline |
+| `max_output_tokens` | `2048` | Integer 16–8192, including reasoning tokens |
+| `max_requests` | `3` | Integer 1–3 per run; runtime turn limits also apply |
+| `max_argument_bytes` | `4096` | Integer 1–4096 UTF-8 bytes before argument parsing |
+| `max_payload_bytes` | `196608` | Integer 1024–196608 for request, response, and replay history |
+
+Only an enabled run's first turn reads `OPENAI_API_KEY` from the process environment.
+Missing/blank keys fail before client construction. Credentials cannot be set through
+settings, questions, or arguments. The client fixes `https://api.openai.com/v1`, ignoring
+`OPENAI_BASE_URL`; there is no custom URL setting. Keep keys out of source control,
+reports, SDK debug logs, and external request tracing. Any future separately approved live
+evaluation must use synthetic operational data only.
+
+Every turn uses `client.responses.create()`, `store=False`, `parallel_tool_calls=False`,
+a bounded output-token limit, client `max_retries=0`, and a request timeout reduced to the
+remaining monotonic deadline. Only the runtime's currently permitted functions are sent:
+`list_queues` or `get_queue_recommendations`, with strict, extra-forbidden schemas.
+Raw argument strings pass through Sprint 4A's UTF-8 size and duplicate-key checks before
+strict tool validation. Extras and boolean/string/float/nonpositive queue IDs are rejected.
+The runtime independently enforces permissions, selection, transitions, and tighter tool
+budgets. Invalid/duplicate call IDs, multiple calls, disallowed tools, and ambiguous
+call/answer combinations fail closed. No retries or repair loops run.
+
+The runtime opens a private adapter scope per run and closes it on every exit. Stateless
+continuation replays accepted provider output items, including encrypted reasoning and
+original function calls, then appends `function_call_output` with the matching `call_id`.
+Its JSON contains the actual successful tool source snapshot and server-issued reference
+metadata. Provider-authored tool results never enter the ledger. No `previous_response_id`
+is used. Reusing one configured adapter creates independent clients, histories, budgets,
+and call-ID sets. Direct callers must use one `open_run()` context per conversation.
+
+The internal Pydantic draft schema has defaults and optional fields. A minimal provider
+`text.format` schema instead requires all seven fields, uses nullable `inability`, and
+forbids extras on every object. Conversion rejects duplicate fields, requires the complete
+shape, and validates through the existing strict `StructuredAnswerDraft`. The runtime still
+checks provenance and complete canonical recommendations in order, then renders fixed
+operational text. Schema compliance does not prove correctness. Counts, actions, severity,
+evidence payloads, and arbitrary explanatory prose cannot be provided as answer fields.
+
+Refusals map to the existing sanitized refusal. Missing SDK/credentials, authentication,
+quota/rate limits, network/request/configuration errors, incomplete/truncated responses,
+and malformed/ambiguous output map to `ModelFailure(unavailable)` and runtime
+`model_unavailable`. SDK timeouts/exhausted deadlines map to `ModelFailure(timeout)` /
+`deadline_exceeded`, preserving existing contracts. Provider exceptions, refusal text,
+headers, and transcripts are never returned. SDK serialization warnings that could echo
+malformed values are suppressed before explicit validation. HTTP timeouts bound individual
+network phases, not the entire process; late responses are rejected and existing cooperative
+deadline, database, and pool limitations remain.
+
+Protocol references: official [function calling](https://developers.openai.com/api/docs/guides/function-calling),
+[structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs), and
+[stateless reasoning](https://developers.openai.com/api/docs/guides/reasoning) documentation.
+Mocked transport verifies SDK parsing, request construction, continuation, state isolation,
+and server grounding. **No live model performance, routing accuracy, availability,
+hallucination rate, cost, or production reliability has been verified.**
+
 ## Tests and quality checks
 
 ```bash
@@ -412,7 +495,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API, Feature 001–003, Sprint 4A, and offline Sprint 4B evaluations against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, and mocked Sprint 4C suites against migrated PostgreSQL 16**. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:
