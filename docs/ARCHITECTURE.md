@@ -1,4 +1,4 @@
-# Architecture — deterministic backend, offline runtime, and mocked provider adapter
+# Architecture — deterministic backend, offline runtime/CLI, and mocked provider adapter
 
 ## Purpose
 
@@ -7,6 +7,8 @@ operational facts. **No live LLM, autonomous writes, automation, or irreversible
 Sprint 4B adds an internal runtime driven only by trusted scripted fake-model outcomes.
 Sprint 4C adds an optional Responses transport verified with mocked provider responses only;
 live model invocations remain unapproved.
+Sprint 4D adds a local offline CLI that exercises the runtime using deterministic simulation
+and actual authorized database facts. It cannot enable a provider or infer intent from questions.
 
 ## Context
 
@@ -315,8 +317,8 @@ separate approval. Migration, local-only, and data-isolation safeguards remain i
 limits, and the versioned response. `fake_model.py` defines a narrow synchronous
 `ModelAdapter` protocol and a `FakeModelAdapter` consuming trusted Python scripts.
 `agent_runtime.py` owns all state and tool dispatch. `agent_evidence.py` owns a private
-request-local ledger of serialized detached JSON snapshots. There is no new API route,
-CLI, framework, persistence, or migration. The fake runtime has no SDK/secret/network
+request-local ledger of serialized detached JSON snapshots. Sprint 4B introduced no new API route,
+CLI, framework, persistence, or migration; Sprint 4D adds the local offline CLI below. The fake runtime has no SDK/secret/network
 dependency; Sprint 4C adds an optional provider boundary below. **No live LLM is connected.**
 
 ### State transitions and routing boundary
@@ -424,6 +426,108 @@ authentication/least-privilege DB role, and local-only limitations remain. Trust
 routing and scripts are inside the trust boundary; this is not a sandbox for arbitrary Python.
 Production authentication, live provider cancellation/reliability, free-text intent routing,
 historical persistence, forecasts, and any write/approval workflow remain future scope.
+
+## Local offline CLI boundary (Sprint 4D)
+
+```
+Trusted local operator: DATABASE_URL / existing settings + AGENT_ALLOWED_QUEUE_IDS
+                                     |
+Explicit CLI command + selection -----+--> agent_cli: validation, AccessContext
+                                                   |
+                                                   v
+                                               run_agent
+                                              /         \
+                              DeterministicDemoAdapter   existing execute_tool
+                              (detached conversation)          |
+                                                     read_only_session
+                                                              |
+                                                     canonical queue services
+                                                              |
+                                              SQLite / migrated PostgreSQL
+                                                   |
+                                     ledger + grounded runtime rendering
+                                                   |
+                              bounded terminal text / existing AgentResponse JSON
+```
+
+`python -m ai_operations_agent.agent_cli` provides only `queues`,
+`assess --queue-id ID`, and `assess --queue-name NAME`. It is a local, synchronous,
+single-process demonstration, with no listener, agent HTTP endpoint, provider-enabled
+mode, autonomous writes, UI, framework, schema creation, seeding, or persistence.
+`FakeModelAdapter` and `OpenAIResponsesAdapter` remain unchanged. The CLI never imports
+or constructs a provider client or reads provider credentials/configuration.
+
+### Local configuration and explicit routing
+
+The local operator/environment is inside the trust boundary. The CLI creates a frozen
+`AccessContext` from `AGENT_ALLOWED_QUEUE_IDS` in the process environment, never `.env`
+or questions. This is a capability grant, not user authentication or independent proof
+of an operator's authority. The setting accepts 1–32 distinct positive ASCII decimal
+IDs (at most PostgreSQL Integer's 2,147,483,647), in at most 512 UTF-8 bytes. Whitespace
+around tokens is ignored; missing/empty values, duplicates, wildcards, noncanonical or
+out-of-range IDs, and excessive scope fail closed before any database access. The
+32-queue ceiling fits the existing draft's maximum discovery reference count. Unknown
+IDs expose no existing data; discovery may be empty, and unknown/forbidden selections
+share the same controlled error. No unscoped fallback exists.
+
+Only explicit command selection constructs the workflow. By-ID selection must belong
+to the allowlist before the runtime starts. Tool grants are narrowed to discovery only,
+assessment only, or both for name resolution. The runtime still independently enforces
+all grants, selection, exact stripped/casefolded name matching, unique name resolution,
+transitions, budgets, and references. Named assessment uses one scoped listing followed
+by exactly one assessment; by-ID assessment skips discovery. There is no preliminary
+database query or second evaluation. Unknown/ambiguous names stop before assessment.
+Questions cannot enable a tool, change permissions/connection/policy, or configure a
+provider. The optional question is unused demonstration text; arbitrary natural-language
+intent is not supported. Queue names are at most 160 characters; the complete serialized
+request must fit the existing 4,096-byte UTF-8 request limit.
+
+Configuration-dependent imports are delayed until after argument/scope/request validation,
+so help works without database configuration and missing/malformed settings produce a
+controlled error without printing validation inputs. Existing local settings still own
+the database target and risk policy. No `.env` file is created or modified.
+
+### Simulation and output
+
+`demo_model.DeterministicDemoAdapter` implements `ModelAdapter.next_turn()` without
+an engine, session, dispatcher, provider, evaluation clock or policy lookup, or evaluation capability.
+It uses only the explicit workflow, trusted selected ID, currently permitted tools,
+and detached successful tool-result conversation. For named workflows it uses the
+same unique matching rule as the runtime to propose the next selected tool argument;
+the runtime remains authoritative. Fixed call IDs are per run, never source IDs.
+Draft references come directly from the runtime-issued reference metadata and codes
+from actual canonical recommendation snapshots. The adapter invents no counts,
+recommendations, sources, tool results, or prose. The existing ledger/renderer validates
+and renders every final answer. Simulation does not establish model intelligence.
+
+The CLI displays existing explanation blocks and limitations, plus a deterministic
+simulation label and literal read-only/advisory/human-review status. It escapes all
+nonprintable Unicode characters inside lines, including C0/C1 controls, ANSI introducers,
+bidi controls, and line separators. JSON uses ASCII escaping and the unchanged
+`AgentResponse` contract; decoded evidence/source values are preserved. The evidence
+view lists successful source IDs, tool names, and validated pointers. Sources are
+**not a complete trace of failed/rejected calls**. Existing runtime/tool limits remain;
+final rendered output also has a 196,608-byte limit after escaping, including its newline.
+Oversize failure replaces the whole output with a small controlled error.
+
+Exit codes distinguish answered (`0`), arguments/request (`2`), local configuration
+(`3`), runtime/database/tool/output failure (`4`), and queue selection failure (`5`).
+Argument errors do not echo untrusted values. Text errors use stderr; JSON execution
+results use stdout. Failed runs show no operational conclusions or resolved evidence;
+existing JSON can retain bounded prior successful sources. Raw exceptions, connection
+strings, credentials, and private provider transcripts are never rendered.
+
+`tests/test_agent_cli.py` reuses synthetic committed read-only fixtures and their exact
+cleanup/baseline comparisons on SQLite and the isolated PostgreSQL test target. It covers
+commands, real tools, all four canonical signals, empty/no-rule queues, scope/selection
+denials, ambiguous names, question injection, control escaping, evidence/JSON, request
+and output limits, sanitized failures, and exit codes. Spies and SQL assertions establish
+one collection/evaluation/recommendation build, no duplicate aggregate query, and no
+flush/commit or changed business rows. Provider imports/constructors and HTTP requests
+are blocked; a separate SQLite subprocess also blocks socket connections and provider
+credential reads. Test setup alone creates its temporary SQLite schema; the CLI does
+not. No test seeds, resets, or modifies the development database. All Sprint 4A–4C and
+Feature 001–003 invariants and limitations remain in force.
 
 ## OpenAI Responses transport boundary (Sprint 4C)
 
