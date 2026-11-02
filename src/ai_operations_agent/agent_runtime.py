@@ -3,6 +3,7 @@
 import json
 import math
 from collections.abc import Callable
+from contextlib import ExitStack
 from copy import deepcopy
 from time import monotonic
 from uuid import uuid4
@@ -24,7 +25,7 @@ from ai_operations_agent.agent_schemas import (
     StructuredAnswerDraft,
     ToolRequest,
 )
-from ai_operations_agent.fake_model import ModelAdapter
+from ai_operations_agent.fake_model import ModelAdapter, RunScopedModelAdapter
 from ai_operations_agent.tool_schemas import (
     AccessContext,
     ExecutionLimits,
@@ -170,6 +171,7 @@ def run_agent(
     target = access.selected_queue_id if isinstance(access, AccessContext) else None
     calls: set[str] = set()
     used: set[str] = set()
+    model_scope = ExitStack()
 
     def failure(code):
         return AgentResponse(run_id=run_id, status="error", sources=ledger.sources,
@@ -213,6 +215,11 @@ def run_agent(
             return deadline - now
 
         conversation = [{"role": "user", "request": request.model_dump()}]
+        try:
+            if isinstance(adapter, RunScopedModelAdapter):
+                adapter = model_scope.enter_context(adapter.open_run())
+        except Exception:
+            raise RuntimeFailure("model_unavailable") from None
         for _ in range(limits.max_model_turns):
             remaining()
             if request.workflow == "unsupported" or assessed is not None:
@@ -318,3 +325,5 @@ def run_agent(
         return finish(failure(exc.code))
     except (GroundingError, ValidationError, TypeError, ValueError, RecursionError, UnicodeError):
         return finish(failure("invalid_answer"))
+    finally:
+        model_scope.close()

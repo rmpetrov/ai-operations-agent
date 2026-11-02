@@ -1,10 +1,12 @@
-# Architecture — deterministic backend and offline Sprint 4B runtime
+# Architecture — deterministic backend, offline runtime, and mocked provider adapter
 
 ## Purpose
 
 Simulate three customer-support queues and provide a reliable, explainable source of
 operational facts. **No live LLM, autonomous writes, automation, or irreversible action.**
 Sprint 4B adds an internal runtime driven only by trusted scripted fake-model outcomes.
+Sprint 4C adds an optional Responses transport verified with mocked provider responses only;
+live model invocations remain unapproved.
 
 ## Context
 
@@ -302,10 +304,10 @@ evidence. Sprint 4B assigns evidence IDs and validates references using that one
 Sprint 4A itself introduces no ledger or explanation; historical replay and provider calls
 remain unimplemented.
 
-Sprint 4B narrowly updates `AGENTS.md` to permit this offline runtime and its evaluations.
-Real providers, credentials/live model calls, autonomous writes, and public deployment still
-require separate approval. Migration, credential, local-only, testing, and data-isolation
-safeguards remain in force.
+Sprint 4B permits this offline runtime and its evaluations; Sprint 4C separately permits
+only the opt-in provider adapter and mocked transport tests below. Live model calls,
+live credential provisioning, autonomous writes, and public deployment still require
+separate approval. Migration, local-only, and data-isolation safeguards remain in force.
 
 ## Offline agent runtime and deterministic evaluations (Sprint 4B)
 
@@ -314,8 +316,8 @@ limits, and the versioned response. `fake_model.py` defines a narrow synchronous
 `ModelAdapter` protocol and a `FakeModelAdapter` consuming trusted Python scripts.
 `agent_runtime.py` owns all state and tool dispatch. `agent_evidence.py` owns a private
 request-local ledger of serialized detached JSON snapshots. There is no new API route,
-CLI, framework, provider dependency, persistence, migration, secret, or network integration.
-**No live LLM is connected.**
+CLI, framework, persistence, or migration. The fake runtime has no SDK/secret/network
+dependency; Sprint 4C adds an optional provider boundary below. **No live LLM is connected.**
 
 ### State transitions and routing boundary
 
@@ -354,8 +356,8 @@ transitions are rejected before dispatch. There are no automatic retries or repa
 JSON conversation values, state-filtered permitted tool names, the draft schema, and an
 absolute monotonic deadline. It receives no engine, session, permissions object, or ledger
 capability. The fake consumes constructor-provided outcomes or raises scripted exceptions;
-no user input is parsed as a script. A future Responses adapter can implement this protocol
-only after separate provider approval and cancellation design.
+no user input is parsed as a script. Sprint 4C implements this protocol through the opt-in
+Responses adapter below; live invocations still require separate approval.
 
 The complete request defaults to 4,096 UTF-8 bytes, a turn to 8,192, and conversation/response
 each to 196,608. Dispatcher argument/result limits remain 4,096/65,536. The default run
@@ -423,12 +425,105 @@ routing and scripts are inside the trust boundary; this is not a sandbox for arb
 Production authentication, live provider cancellation/reliability, free-text intent routing,
 historical persistence, forecasts, and any write/approval workflow remain future scope.
 
+## OpenAI Responses transport boundary (Sprint 4C)
+
+`openai_responses.py` implements the existing synchronous `ModelAdapter.next_turn()` protocol.
+This is an approved adapter implementation and mocked-test milestone, not approval for live
+model invocations. The SDK is an optional `openai>=2.54,<3` extra, tested with 2.54.0.
+No application route, startup/health integration, framework, hosted tool, database schema,
+migration, or autonomous write is introduced. Existing API and `offline-agent-v1` contracts,
+the fake adapter, dispatcher, private evidence ledger, and server renderer remain intact.
+
+### Configuration, lifetime, and budgets
+
+Frozen `ResponsesSettings` defaults to disabled and requires an explicit model ID when
+enabled. Trusted Python code alone selects the model, timeout, token limit, request ceiling,
+and payload limits; questions/tool arguments cannot configure the adapter. It does not read
+`.env`. Only the first enabled turn reads `OPENAI_API_KEY` from the environment, then lazily
+imports the SDK and builds a client. Missing/blank credentials return sanitized failure.
+The fixed official base URL prevents environment `OPENAI_BASE_URL` from redirecting secrets.
+Client construction does not occur at import, startup, health checks, or fake evaluations.
+No secret is part of settings, answer data, or adapter logs. SDK debug/external request
+tracing must not be enabled with secrets or operational transcripts.
+
+The optional `RunScopedModelAdapter.open_run()` lifecycle lets `run_agent()` obtain a new
+adapter scope using `ExitStack` and guarantees cleanup on all exits. Existing adapters need
+only `next_turn()` and retain their behavior. Each provider scope owns its client, accepted
+output items, conversation prefix, pending call, seen call IDs, and request counter. Scope
+closure closes the SDK client and discards history. Reusing a configured adapter or opening
+overlapping scopes cannot share that state. Direct callers use a fresh scope per run;
+attempting to restart a used scope fails closed. No cross-run cache or response ID exists.
+
+The client has `max_retries=0`; each `responses.create()` uses `store=False`,
+`parallel_tool_calls=False`, explicit model, and bounded `max_output_tokens` (default 2048,
+ceiling 8192). Provider requests default to at most three and can only be lowered, alongside
+runtime turn limits. The default ten-second timeout is capped by the remaining monotonic
+deadline, rechecked after client/preparation work and after decoding. HTTPX timeouts apply
+per network phase, not as hard process preemption. Late results fail, with no repair/retry.
+Requests, responses, and complete replay history each have a 196608-byte default ceiling.
+No live costs, model compatibility, cancellation reliability, or quality are established.
+
+### Function and final-output conversion
+
+Only the tools supplied by the current runtime state are advertised. Function schemas
+require every property and forbid extras. Functions can only be `list_queues` and
+`get_queue_recommendations`; no arbitrary SQL, hosted tools, or writes exist. A response
+must contain exactly one function call or one structured assistant message, optionally
+accompanied by reasoning. Unknown output types, batches, mixed calls/messages, incomplete
+items/responses, and invalid/duplicate call IDs fail before dispatch.
+
+Arguments remain raw JSON strings until Sprint 4A's parser checks UTF-8 size (default 4096)
+and rejects duplicate keys while processing pairs. Nonobject/malformed JSON and extra
+fields fail. Strict Pydantic tool validation rejects coerced queue IDs, including booleans,
+strings, floats, null, and nonpositive IDs. The runtime revalidates dictionaries against
+its own limits and authorizes the selected/resolved queue before any business read. SDK
+parse helpers are not used. SDK serialization warnings are disabled to avoid echoing
+malformed untrusted values; explicit application validation remains mandatory.
+
+The internal draft schema includes optional/defaulted fields that strict provider schemas
+cannot directly retain. A minimal provider schema uses a required object root, nested
+extra-forbidden objects, enums, arrays, and nullable inability, with all seven fields
+required and no defaults. It permits only answer kind, references, recommendation codes,
+block kinds, and inability categories. Duplicate/extra/missing fields and invalid types
+fail conversion to the original strict `StructuredAnswerDraft`. Counts, actions, operational
+severity, evidence payloads, and arbitrary prose are excluded. Shape validity grants no
+authority: the existing ledger/rendering pipeline still checks provenance, recommendation
+membership/completeness/order, and all evidence before accepting an operational answer.
+
+### Stateless continuation and failures
+
+For each successful call, retain all accepted native output items in their original order,
+including the function call and encrypted reasoning (`include: reasoning.encrypted_content`).
+The next adapter turn accepts only the matching runtime conversation prefix, assistant
+outcome, and successful tool record. It appends `function_call_output` with the provider's
+exact `call_id`; output JSON contains the complete trusted source snapshot plus server
+reference metadata. All earlier function outputs and reasoning are replayed on subsequent
+turns. No `previous_response_id` or hosted conversation is used with `store=False`.
+Model-authored function outputs are rejected and cannot become authoritative evidence.
+
+Refusal text is discarded and converted to `Refusal`. Authentication/missing credentials,
+quota/rate-limit, connection, invalid-request/unsupported-model, missing-SDK, and malformed
+or incomplete response errors normalize to existing `ModelFailure(unavailable)`; provider
+timeouts/deadline exhaustion normalize to `ModelFailure(timeout)`. The runtime retains its
+existing `model_unavailable` / `deadline_exceeded` response codes. This intentionally avoids
+expanding the public contract or leaking raw exceptions, headers, secrets, or transcripts.
+
+`tests/test_openai_responses.py` uses the official SDK with `httpx.MockTransport` and blocked
+real HTTP transport; it requires no real API key and is installed/run in CI on SQLite and
+isolated PostgreSQL. Tests cover the full workflows, strict schemas/arguments, continuation
+and correlation, failures/refusals, request/deadline/size budgets, isolation and cleanup,
+grounding attacks, unchanged routes/health behavior, and read-only database invariants.
+These tests verify transport integration and deterministic evidence controls only. **Live
+model behavior and performance have not been evaluated.** Future approved live evaluations
+must use synthetic operational data. Public deployment, live calls, new agent HTTP endpoints,
+arbitrary tools/SQL, and autonomous writes remain outside this milestone.
+
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.
 - Immutable event log for agent decisions and the actual changes they trigger.
 - Authentication, roles, human approval, and a least-privilege database role.
-- Live provider integration, intent routing, and cancellation (separate approval).
+- Approved live provider invocation, intent routing, and hard cancellation (separate approval).
 - Metrics snapshots / event ingestion from a real external support tool.
 - Observability, retries/idempotency, deployment and threat modeling.
 - Real-model routing/quality evaluations based on deterministic operational facts.
