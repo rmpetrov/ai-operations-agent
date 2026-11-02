@@ -24,6 +24,7 @@ from ai_operations_agent.agent_schemas import (
     StructuredAnswerDraft,
     ToolRequest,
 )
+from ai_operations_agent.agent_telemetry import RuntimeTrace
 from ai_operations_agent.tool_schemas import (
     ListQueuesArguments,
     QueueRecommendationsArguments,
@@ -117,10 +118,12 @@ class OpenAIResponsesAdapter:
         self, settings: ResponsesSettings | None = None, *,
         client_factory: Callable[..., Any] | None = None,
         clock: Callable[[], float] = monotonic,
+        trace: RuntimeTrace | None = None,
     ):
         self.settings = settings or ResponsesSettings()
         self._factory = client_factory
         self._clock = clock
+        self._trace = trace
         self._client = None
         self._history: list[dict] = []
         self._conversation: tuple[dict, ...] = ()
@@ -131,7 +134,8 @@ class OpenAIResponsesAdapter:
 
     @contextmanager
     def open_run(self) -> Iterator["OpenAIResponsesAdapter"]:
-        run = OpenAIResponsesAdapter(self.settings, client_factory=self._factory, clock=self._clock)
+        run = OpenAIResponsesAdapter(self.settings, client_factory=self._factory, clock=self._clock,
+                                     trace=self._trace)
         try:
             yield run
         finally:
@@ -292,11 +296,15 @@ class OpenAIResponsesAdapter:
             # Recheck after preparation/client construction so they consume the same deadline.
             kwargs["timeout"] = self._remaining(deadline)
             self._requests += 1
+            if self._trace is not None:
+                self._trace.provider_request()
             response = self._client.responses.create(**kwargs)
-            self._remaining(deadline)
             # SDK models may hold malformed values; do not let serializer warnings echo
             # those untrusted values before our explicit validation rejects them.
             data = response.model_dump(mode="json", exclude_none=True, warnings=False)
+            if self._trace is not None:
+                self._trace.provider_response(data.get("usage"))
+            self._remaining(deadline)
             self._bounded(data)
             turn = self._decode(data, permitted_tools)
             self._remaining(deadline)

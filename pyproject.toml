@@ -24,6 +24,9 @@ openai = ["openai>=2.54,<3"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+ai_operations_agent = ["evaluation_data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

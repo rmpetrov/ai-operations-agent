@@ -25,6 +25,7 @@ from ai_operations_agent.agent_schemas import (
     StructuredAnswerDraft,
     ToolRequest,
 )
+from ai_operations_agent.agent_telemetry import RuntimeTrace
 from ai_operations_agent.fake_model import ModelAdapter, RunScopedModelAdapter
 from ai_operations_agent.tool_schemas import (
     AccessContext,
@@ -157,6 +158,8 @@ def run_agent(
     request: AgentRequest, access: AccessContext, adapter: ModelAdapter, *,
     engine: Engine | None = None, limits: RuntimeLimits | None = None,
     clock: Callable[[], float] = monotonic, new_id: Callable[[], str] = lambda: uuid4().hex,
+    trace: RuntimeTrace | None = None,
+    evaluation_context: tools.EvaluationContext | None = None,
 ) -> AgentResponse:
     """Trusted Python entry point; no HTTP endpoint, CLI, script parser, or persistence.
 
@@ -172,6 +175,13 @@ def run_agent(
     calls: set[str] = set()
     used: set[str] = set()
     model_scope = ExitStack()
+    pending_tool = None
+
+    def reject_pending():
+        nonlocal pending_tool
+        if trace is not None and pending_tool is not None:
+            trace.event("tool_rejected", name=pending_tool)
+        pending_tool = None
 
     def failure(code):
         return AgentResponse(run_id=run_id, status="error", sources=ledger.sources,
@@ -185,9 +195,11 @@ def run_agent(
             raise GroundingError("response provenance mismatch")
         if len(response.model_dump_json().encode("utf-8")) > limits.max_response_bytes:
             # Oversize failure is atomic; no partial facts or truncated source snapshots.
-            return AgentResponse(run_id=run_id, status="error", error=SanitizedError(
+            response = AgentResponse(run_id=run_id, status="error", error=SanitizedError(
                 code="size_limit", message=_MESSAGES["size_limit"],
             ))
+        if trace is not None:
+            trace.final_status = response.status
         return response
 
     try:
@@ -244,6 +256,13 @@ def run_agent(
                 raise RuntimeFailure("deadline_exceeded") from None
             except Exception:
                 raise RuntimeFailure("model_unavailable") from None
+            if trace is not None:
+                trace.model_turn(turn)
+                raw_turn = turn.model_dump() if isinstance(turn, ToolRequest) else turn
+                if type(raw_turn) is dict and raw_turn.get("type") == "tool_request":
+                    pending_tool = raw_turn.get("name", "unsupported")
+                    if type(pending_tool) is not str:
+                        pending_tool = "unsupported"
             remaining()
             try:
                 raw = turn.model_dump() if isinstance(turn, (ToolRequest, StructuredAnswerDraft,
@@ -287,6 +306,9 @@ def run_agent(
                 raise RuntimeFailure("invalid_arguments") from None
             calls.add(turn.call_id)
             used.add(turn.name)
+            if trace is not None:
+                trace.event("tool_accepted", name=turn.name, arguments=payload)
+            pending_tool = None
             # A PostgreSQL statement may consume only the remaining run budget.
             tool_limits = ExecutionLimits(
                 max_argument_bytes=access.limits.max_argument_bytes,
@@ -296,13 +318,18 @@ def run_agent(
             )
             scoped = access.model_copy(update={"limits": tool_limits})
             try:
-                snapshot = tools.execute_tool(turn.name, payload, scoped, engine=engine)
+                if trace is not None:
+                    trace.event("tool_dispatched", name=turn.name, arguments=payload)
+                extra = {"evaluation_context": evaluation_context} if evaluation_context else {}
+                snapshot = tools.execute_tool(turn.name, payload, scoped, engine=engine, **extra)
             except tools.ToolError as exc:
                 raise RuntimeFailure(_TOOL_ERRORS.get(str(exc), "tool_failure")) from None
             except Exception:
                 raise RuntimeFailure("tool_failure") from None
             remaining()  # Expired tool results cannot become evidence.
             source = ledger.capture(turn.name, snapshot)
+            if trace is not None:
+                trace.event("tool_completed", name=turn.name, snapshot=snapshot)
             if turn.name == "list_queues":
                 discovered = source
                 if request.workflow == "queue_assessment":
@@ -322,8 +349,10 @@ def run_agent(
             }]
         raise RuntimeFailure("model_budget_exceeded")
     except RuntimeFailure as exc:
+        reject_pending()
         return finish(failure(exc.code))
     except (GroundingError, ValidationError, TypeError, ValueError, RecursionError, UnicodeError):
+        reject_pending()
         return finish(failure("invalid_answer"))
     finally:
         model_scope.close()

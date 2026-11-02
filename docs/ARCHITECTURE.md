@@ -1,4 +1,4 @@
-# Architecture — deterministic backend, offline runtime/CLI, and mocked provider adapter
+# Architecture — deterministic backend, offline runtime/CLI/evaluation, and mocked provider adapter
 
 ## Purpose
 
@@ -9,6 +9,7 @@ Sprint 4C adds an optional Responses transport verified with mocked provider res
 live model invocations remain unapproved.
 Sprint 4D adds a local offline CLI that exercises the runtime using deterministic simulation
 and actual authorized database facts. It cannot enable a provider or infer intent from questions.
+Sprint 4E-1 adds versioned offline evaluations using isolated synthetic fixtures only.
 
 ## Context
 
@@ -621,6 +622,76 @@ These tests verify transport integration and deterministic evidence controls onl
 model behavior and performance have not been evaluated.** Future approved live evaluations
 must use synthetic operational data. Public deployment, live calls, new agent HTTP endpoints,
 arbitrary tools/SQL, and autonomous writes remain outside this milestone.
+
+## Reproducible evaluation harness (Sprint 4E-1)
+
+`python -m ai_operations_agent.evaluation` is a separate offline entry point. It has no
+provider/database URL/model/credential options and never routes questions. It loads strict,
+frozen scenario contracts from packaged `evaluation_data/v1.json`, selects distinct scenario
+IDs in dataset order, executes them, scores them, and writes ignored JSON and Markdown reports.
+The existing demo and scripted fake adapters are its only adapters. Existing SDK `MockTransport`
+tests additionally exercise Responses usage telemetry and independent scoring.
+
+The dataset declares 26 scenarios in `task_success`, `security`, and `failure` categories. Each
+specifies a trusted workflow/question, queue scope/selection, scripted behavior, allowed dispatched
+sequences/variants with exact symbolic queue arguments, terminal status/error, literal recommendation
+membership/order when applicable, and security invariants. Validation rejects duplicate IDs/scopes/codes,
+unordered catalogs, missing security properties, inconsistent status/error expectations, and expected
+dispatch outside scope/selection. Expectations are never imported from the engine or inferred from output.
+
+`evaluation_fixtures.py` creates only private in-memory SQLite engines for runner use. Fixtures
+include empty/healthy queues, isolated signal triggers, simultaneous signals, casefold-ambiguous
+names, and a hidden queue. Fixed order, UTC evaluation time, and immutable `RiskPolicy` make SQLite
+outcomes repeatable. A trusted optional `EvaluationContext` passes time/policy from runtime to tools
+without changing tool schemas, HTTP dependencies, or default CLI behavior. No global monkeypatch,
+development URL/reset/seed, or persistent database is used by the runner. Test-only `owned_fixtures`
+also accepts the existing validated PostgreSQL fixture engine, uses unique namespaces and owned IDs,
+cleans up in FK order, and compares all business rows with the pre-test baseline. Alembic still owns
+the PostgreSQL schema; application startup never creates tables.
+
+The evaluator invokes `run_agent` and the real dispatcher; it implements no risk/recommendation
+rules. It compares dispatched names and type-sensitive canonical argument fingerprints with declared
+variants, checks status/error, compares discovery identities and ordered recommendation codes with
+independent expectations, revalidates `AgentResponse`, and matches source fingerprints to successful
+ledger captures in the trace. Source scope/selection is checked separately. SQL observation covers
+runtime only; a second guard records and blocks attempted non-read statements without retaining SQL
+or parameters. Before/after business-row snapshots detect state changes. Fixture writes are excluded.
+
+Optional `RuntimeTrace` is owned by trusted code and never sent to the adapter or added to
+`AgentResponse`. It distinguishes model turns, adapter-emitted requests, runtime acceptance/rejection,
+dispatch attempts, and successful ledger captures. Accepted calls can fail or expire without a source.
+Rejected requests include invalid transitions, arguments, and authorization. Provider protocol items
+rejected inside the Responses adapter are classified as model failures; they are not falsely reported
+as runtime-emitted requests. This trace claims no visibility into provider reasoning. Known tool labels,
+argument/snapshot hashes, counts, status, duration, and actual nonnegative token counts are the only
+evaluation metadata. Raw arguments/questions/exceptions/provider output, encrypted reasoning, headers,
+and credentials never enter reports. Hashes are comparison metadata, not authorization or a promise of
+secrecy against guessing values.
+
+Scoring reports scenario pass rate, normal-case task completion, tool selection, exact arguments,
+grounding, recommendation completeness/order, unauthorized execution, writes/attempts, nonanswer rate,
+and local elapsed mean/median/max. Rates include numerator/eligible denominator; absent applicability
+is `null`. Tool/argument quality compares requests with legal workflow prefixes and includes deliberate
+attacks. Negative scenario gates test expected rejection and absence of forbidden execution/claims;
+expected refusal is a passing defense. Hard violations are separate from ordinary quality and
+unexpected-error failures. Any required gate failure returns exit 1; invalid selection or execution/
+reporting failure returns exit 2.
+
+Responses telemetry counts each attempted SDK `responses.create`, including failures, and reads only
+`input_tokens`, `output_tokens`, and `total_tokens` when valid fields exist. If any contributing request
+lacks a field its aggregate remains unknown. Fake-only runs report zero provider requests and unknown
+tokens. `evaluation_costs.py` is a read-only interface for a future externally verified, explicitly
+versioned/model-specific price table with verification date and source. No prices or billing calls ship;
+missing usage/pricing leaves cost unknown. Estimates are not provider spending caps. Live execution and
+credential provisioning remain prohibited pending separate approval; future approved live evaluations
+require synthetic data.
+
+Reports record dataset/fixture/report versions, fixed fact-evaluation time, Git commit/dirty state
+(unknown outside a checkout), adapter/model identity, per-scenario checks/events, metrics, violations,
+timing/usage, and limitations. They omit operational snapshots and transcripts. Default reports are
+Git-ignored. Determinism applies to scores/outcomes, not timing, Git state, or PostgreSQL IDs/namespaces.
+Scripted results do not measure language routing, real-model hallucination frequency, provider
+availability/latency, cost, or production readiness.
 
 ## Future work (not implemented)
 

@@ -1,6 +1,8 @@
 """Exactly two internal read-only tools, with no provider, runtime, CLI, or agent API."""
 
 import json
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -11,6 +13,7 @@ from ai_operations_agent import queue_services
 from ai_operations_agent.clock import get_evaluation_time
 from ai_operations_agent.config import get_risk_policy
 from ai_operations_agent.read_only import read_only_session
+from ai_operations_agent.risk import RiskPolicy
 from ai_operations_agent.tool_schemas import (
     AccessContext,
     ListQueuesArguments,
@@ -25,6 +28,14 @@ _QUEUE_LIST = TypeAdapter(list[QueueIdentity])
 
 class ToolError(ValueError):
     """Stable sanitized error; input values and database details are never included."""
+
+
+@dataclass(frozen=True)
+class EvaluationContext:
+    """Trusted offline replay inputs; never accepted as tool arguments or user settings."""
+
+    evaluated_at: datetime
+    policy: RiskPolicy
 
 
 def _unique_object(pairs):
@@ -58,6 +69,7 @@ def _arguments(value: dict | str, max_bytes: int) -> dict:
 
 def execute_tool(
     name: str, arguments: dict | str, access: AccessContext, *, engine: Engine | None = None,
+    evaluation_context: EvaluationContext | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     """Return a fresh JSON snapshot after the owned business session has closed.
 
@@ -109,7 +121,9 @@ def execute_tool(
                 result = _QUEUE_LIST.dump_json(identities)
             else:
                 context = queue_services.assess_queue(
-                    db, args.queue_id, get_evaluation_time(), get_risk_policy(),
+                    db, args.queue_id,
+                    evaluation_context.evaluated_at if evaluation_context else get_evaluation_time(),
+                    evaluation_context.policy if evaluation_context else get_risk_policy(),
                 )
                 if context is None:
                     raise ToolError("queue unavailable")
