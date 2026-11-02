@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4C — opt-in OpenAI Responses adapter, verified through mocked SDK transport only. Live model calls remain unapproved. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4D — local offline CLI demonstration using deterministic simulation and actual read-only database tools. The Sprint 4C provider adapter is verified through mocked SDK transport only. Live model calls remain unapproved. Local development only; no authentication or public deployment.
 
 ## Tech stack
 
@@ -274,7 +274,7 @@ Trusted Python server code can call exactly two tools through `tools.execute_too
 | `list_queues` | `{}` | `[{"id": 2, "name": "Billing"}]`, ordered by ID |
 | `get_queue_recommendations` | `{"queue_id": 2}` | The canonical `QueueRecommendations` structure shown above |
 
-These are internal functions; there is no new HTTP endpoint, CLI, live provider,
+Sprint 4A introduced these internal functions without a new HTTP endpoint, CLI, live provider,
 or external tool. Sprint 4B adds the internal offline runtime described below.
 No API credentials or new dependencies are needed.
 An internal call from trusted server code, using queue IDs authorized by that server:
@@ -329,7 +329,7 @@ role, user authentication, or public access boundary is introduced here.
 ## Offline agent runtime (Sprint 4B)
 
 **No live LLM is connected.** `agent_runtime.run_agent` is an internal synchronous Python
-entry point, with no agent API endpoint or CLI. Trusted application/test code supplies an
+entry point, with no agent API endpoint. Sprint 4D adds the local offline CLI below. Trusted application/test code supplies an
 `AgentRequest`, the existing server-owned `AccessContext`, and a `FakeModelAdapter` script.
 Questions cannot carry scripts or permissions. The fake adapter needs no provider SDK,
 model network call, or secret. Sprint 4C adds the optional adapter below without changing
@@ -409,7 +409,7 @@ frequency, general language understanding, or production readiness.
 
 `openai_responses.OpenAIResponsesAdapter` is an internal, disabled-by-default transport for
 `run_agent()`. This milestone authorizes implementation and mocked testing only;
-**it does not authorize live model calls**. No agent HTTP endpoint, CLI, provider startup
+**it does not authorize live model calls**. No agent HTTP endpoint, provider-enabled CLI, provider startup
 dependency, hosted tool, framework, write tool, persistence, or deployment is added.
 
 Install the optional official Python SDK and run provider tests without real credentials:
@@ -487,6 +487,85 @@ Mocked transport verifies SDK parsing, request construction, continuation, state
 and server grounding. **No live model performance, routing accuracy, availability,
 hallucination rate, cost, or production reliability has been verified.**
 
+## Local offline CLI demonstration (Sprint 4D)
+
+**Deterministic simulation, not live-model intelligence.** The CLI runs locally in one
+process and reads the existing migrated database using the real runtime and tools. It
+needs the backend dependencies and `DATABASE_URL` from your existing local environment
+or `.env`. It never creates tables, seeds data, persists assessments, or modifies operational
+rows. No OpenAI SDK, API key, provider configuration, or model request is used.
+
+From the repository root, activate the existing virtual environment. A trusted local
+operator must set the visible queue scope explicitly in the **process environment**.
+Use IDs that operator has authorized in the local database; the following assumes queue
+1 is authorized and exists. Queue IDs and names depend on your data, so substitute the
+listed ID/name when necessary:
+
+```bash
+source .venv/bin/activate
+export AGENT_ALLOWED_QUEUE_IDS='1'
+# For multiple explicitly authorized queues: export AGENT_ALLOWED_QUEUE_IDS='1,2'
+python -m ai_operations_agent.agent_cli queues
+python -m ai_operations_agent.agent_cli assess --queue-id 1
+python -m ai_operations_agent.agent_cli assess --queue-name 'Technical Support'
+python -m ai_operations_agent.agent_cli assess --queue-id 1 --evidence
+python -m ai_operations_agent.agent_cli assess --queue-id 1 --json
+python -m ai_operations_agent.agent_cli assess --queue-id 1 --question 'Show the configured review suggestions.'
+python -m ai_operations_agent.agent_cli --help
+```
+
+`AGENT_ALLOWED_QUEUE_IDS` accepts 1–32 distinct positive decimal database IDs, at most
+2,147,483,647 each, separated by commas; surrounding whitespace is allowed. Its maximum
+size is 512 UTF-8 bytes. Missing/empty values, wildcards, duplicates, malformed IDs, and
+oversized lists fail closed before database access. This is trusted local configuration,
+not authentication: anyone who controls the process environment controls its queue grants.
+No permissions are taken from `.env`, command-line flags, or question text. Unknown IDs
+grant no existing data; selecting an unknown or forbidden ID produces the same controlled
+`queue unavailable` error. Discovery can return an empty authorized list.
+
+`queues` calls only scoped `list_queues`. Assessment by ID calls
+`get_queue_recommendations` once. Assessment by name first discovers authorized queues,
+then uses an exact match ignoring case and surrounding whitespace. Missing names fail;
+ambiguous names require selection by ID. The CLI never chooses the first match. Arguments
+select within scope and cannot expand it. No tool names, SQL, provider URLs, models,
+credentials, or permission flags are accepted.
+
+The optional question is demonstration text only. **The CLI does not interpret arbitrary
+questions**, route natural-language requests, or answer forecasts/staffing questions.
+The explicit command always determines the workflow, regardless of question content.
+The entire serialized request, including question, workflow, and optional queue name,
+must fit 4,096 UTF-8 bytes; queue names are limited to 160 characters. Common options can
+appear before or after the command.
+
+Human-readable assessment output includes queue name/ID, evaluation time, active tickets,
+recorded severity, all canonical recommendations in their existing order, uncertainty,
+and advisory/human-review status. Empty recommendations mean only that no configured
+rule triggered. Untrusted terminal control characters, ANSI sequences, bidi controls,
+and Unicode line separators are escaped. `--evidence` shows successful source IDs/tool
+names and validated references, **not a complete trace of failed or rejected calls**.
+
+`--json` emits exactly the existing `offline-agent-v1` `AgentResponse`, including sources,
+resolved evidence, flags, explanations, and sanitized errors. It preserves source values
+using ASCII JSON escapes; all CLI JSON is still deterministic simulation. Evidence is
+already included in JSON, so `--evidence --json` adds no extra output. Final text/JSON is
+bounded to 196,608 UTF-8 bytes including escaping and the trailing newline. Oversized
+output fails atomically. Failed runs emit no operational conclusions/evidence; JSON may
+retain prior successful source records under the runtime's existing contract.
+
+Exit codes: `0` answered; `2` invalid arguments or request size; `3` invalid/missing scope
+or database/policy configuration; `4` database/runtime/tool/output failure; `5` unknown,
+forbidden, or ambiguous queue. Human-readable failures go to stderr; JSON execution
+results, including controlled failures, go to stdout. Argument parsing errors always go
+to stderr, with no echoed argument values. No raw exception, connection string,
+credential, or private provider transcript is printed.
+
+The deterministic adapter only selects permitted tool requests and builds structured
+drafts from the runtime conversation's actual snapshots and issued references. It has
+no database/dispatcher capability and performs no independent assessment or recommendation
+evaluation. The runtime validates grounding and renders the final canonical text. Existing
+policy, transaction consistency, cooperative timeout, and local-only limitations apply.
+Nothing here demonstrates real-model language understanding or production readiness.
+
 ## Tests and quality checks
 
 ```bash
@@ -495,7 +574,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, and mocked Sprint 4C suites against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, and local offline Sprint 4D suites against migrated PostgreSQL 16**. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:
