@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4A — internal scoped read-only tools and shared services. Local development only; no LLM, no agent runtime, no authentication, no public deployment.
+> **Status:** Sprint 4B — offline agent runtime with scripted fake-model evaluations. No live LLM is connected. Local development only; no authentication or public deployment.
 
 ## Tech stack
 
@@ -274,8 +274,9 @@ Trusted Python server code can call exactly two tools through `tools.execute_too
 | `list_queues` | `{}` | `[{"id": 2, "name": "Billing"}]`, ordered by ID |
 | `get_queue_recommendations` | `{"queue_id": 2}` | The canonical `QueueRecommendations` structure shown above |
 
-These are internal functions; there is no new HTTP endpoint, CLI, provider, model adapter,
-agent loop, or external tool. No API credentials or new dependencies are needed.
+These are internal functions; there is no new HTTP endpoint, CLI, live provider,
+or external tool. Sprint 4B adds the internal offline runtime described below.
+No API credentials or new dependencies are needed.
 An internal call from trusted server code, using queue IDs authorized by that server:
 
 ```python
@@ -304,8 +305,8 @@ are 4,096 UTF-8 argument bytes, 65,536 result bytes, and a 5,000 ms PostgreSQL s
 timeout. Oversized results fail without returning a partial snapshot. Outputs contain only
 validated queue identity or aggregate recommendation data, with no individual tickets,
 subjects, external IDs, ORM objects, or sessions. Each call returns fresh JSON-compatible
-values after its business session closes; a future runtime can assign evidence IDs to that
-snapshot without re-querying. No evidence ledger or model explanation is implemented.
+values after its business session closes. The Sprint 4B runtime assigns evidence IDs to these
+snapshots without re-querying.
 
 `queue_services.py` supplies HTTP-independent listing, assessment orchestration, and
 canonical response builders to both routes and tools. Existing HTTP response contracts and
@@ -325,6 +326,84 @@ use of a shared in-memory connection. PostgreSQL retains the existing Read Commi
 consistency limits between queue lookup and aggregate. No dedicated least-privilege database
 role, user authentication, or public access boundary is introduced here.
 
+## Offline agent runtime (Sprint 4B)
+
+**No live LLM is connected.** `agent_runtime.run_agent` is an internal synchronous Python
+entry point, with no agent API endpoint or CLI. Trusted application/test code supplies an
+`AgentRequest`, the existing server-owned `AccessContext`, and a `FakeModelAdapter` script.
+Questions cannot carry scripts or permissions. There is no provider SDK, network model
+call, framework, new secret, migration, or autonomous write.
+
+The application explicitly chooses `discovery`, `queue_assessment`, or `unsupported`.
+This milestone does not classify free-text questions. Application routing must mark
+forecast/staffing requests unsupported; the runtime rejects operational answers and tools
+for that workflow. Selected queues come exclusively from `AccessContext`. Without a
+selected queue, an assessment needs a queue name and successful scoped discovery; exact
+matching ignores case and surrounding whitespace. Missing matches return
+`insufficient_information`; multiple matches or a missing name return `needs_clarification`.
+No first-match fallback is used. A model request for another authorized queue still fails
+if it differs from the resolved name or explicit selection. Authorization remains a
+separate server check, independent of model routing.
+
+| Workflow | Permitted sequence |
+|---|---|
+| Discovery | `list_queues` → validated discovery answer |
+| Server-selected assessment | `get_queue_recommendations` → validated queue answer |
+| Named assessment | `list_queues` → `get_queue_recommendations` → validated queue answer |
+| Unsupported capability | Structured inability, with zero tool calls |
+
+Hard ceilings are **2 serial tool requests and 3 model turns**, with exactly one outcome
+per turn. Duplicate IDs, repeated discovery/assessment, batches, wrong arguments, unsupported
+tools, and invalid transitions fail before tool execution. Final answers end the run;
+there are no retries or repair loops. Each tool retains its own read-only transaction and
+closes it before the next simulated model turn.
+
+The adapter contract is `next_turn(conversation, permitted_tools, response_schema, deadline)`.
+It receives detached JSON and an absolute monotonic deadline and returns one `ToolRequest`,
+`StructuredAnswerDraft`, `Refusal`, or `ModelFailure`. `FakeModelAdapter` consumes only a
+trusted Python script. A future live adapter needs separate approval and must honor deadline
+cancellation; none is implemented here.
+
+Defaults bound the complete request to 4,096 UTF-8 bytes, each model outcome to 8,192 bytes,
+the conversation and response each to 196,608 bytes, and elapsed execution to 10 seconds
+(configurable up to 30). Existing tool limits remain 4,096 argument bytes and 65,536 result
+bytes. Runtime PostgreSQL statement timeouts are reduced to the remaining time budget.
+The monotonic clock is injectable; results arriving after the deadline cannot become evidence.
+Checks are cooperative around synchronous operations, not thread/process preemption; pool
+connection waits and SQLite statements have no run-wide cancellation facility.
+
+The request-local ledger stores immutable serialized copies of complete successful tool
+snapshots, each with a unique server-generated source ID. Allowed references point only to
+discovered queue entries, the full assessment, its named metrics, or existing recommendation
+entries. Reference type, pointer, queue, provenance, recommendation membership, completeness,
+and canonical order are validated. Sources never cross requests or require database reads
+to resolve. Adapter-visible copies cannot change ledger contents.
+
+Drafts contain references, recommendation codes, block types, and supported inability
+categories. Extra fields such as counts, actions, priorities, timestamps, source payloads,
+or free-form operational prose are rejected. The server renders fixed templates using
+canonical snapshots and includes **every** triggered recommendation in canonical order.
+Empty recommendations explicitly do not guarantee operational health. Overlapping counts
+are never summed, and aggregate evidence never identifies tickets or establishes staffing needs.
+
+The strict `offline-agent-v1` response separates `sources` (complete canonical snapshots)
+and `evidence` (resolved references) from `explanation` (server-rendered presentation).
+It includes `run_id`, `status`, literal `read_only`, `advisory_only`, and
+`requires_human_review` flags, `uncertainty`, and a sanitized `error` or null. Statuses are
+`answered`, `needs_clarification`, `insufficient_information`, `unsupported`, and `error`.
+There is no approval or execution state. Failures retain prior successful sources for audit
+but emit no operational evidence or conclusions; an oversized response fails atomically
+without truncated snapshots. Sources and resolved evidence intentionally duplicate a bounded
+amount of data to keep responses self-contained and traceable. Nothing is persisted.
+
+`tests/test_offline_agent_evaluations.py` contains **offline deterministic evaluations** for
+the complete workflows, four simultaneous signals, empty/no-trigger queues, missing and
+ambiguous names, authorization, injection-style questions, schema/grounding attacks,
+budgets, exceptions, size/deadline limits, sanitization, and read-only/query/session invariants.
+They exercise the real dispatcher on both database backends. They establish scripted control
+and evidence guarantees; they do **not** measure real-model routing accuracy, hallucination
+frequency, general language understanding, or production readiness.
+
 ## Tests and quality checks
 
 ```bash
@@ -333,7 +412,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API, Feature 001–003, and Sprint 4A tests against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001–003, Sprint 4A, and offline Sprint 4B evaluations against migrated PostgreSQL 16**. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:
