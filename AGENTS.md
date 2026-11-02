@@ -10,3 +10,4 @@
 - Keep PRs focused, include an API test for each behavior change, and explain technical tradeoffs.
 - Never claim PostgreSQL integration passed without running it with `TEST_DATABASE_URL`.
 - Leave generated reports, test DBs, and secrets out of git.
+- Sprint 4E-1 additionally permits a reproducible offline evaluation harness using versioned synthetic scenarios, private in-memory SQLite, existing isolated PostgreSQL test fixtures, and optional request-local sanitized metadata. Generated reports remain ignored. This does not approve live model execution, live credential provisioning, development data resets, or natural-language workflow routing.

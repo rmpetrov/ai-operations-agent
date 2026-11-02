@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4D — local offline CLI demonstration using deterministic simulation and actual read-only database tools. The Sprint 4C provider adapter is verified through mocked SDK transport only. Live model calls remain unapproved. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4E-1 — reproducible offline evaluations with versioned synthetic scenarios and isolated fixtures, alongside the Sprint 4D offline CLI. The Sprint 4C provider adapter is verified through mocked SDK transport only. Live model calls and live credential provisioning remain unapproved. Local development only; no authentication or public deployment.
 
 ## Tech stack
 
@@ -566,6 +566,72 @@ evaluation. The runtime validates grounding and renders the final canonical text
 policy, transaction consistency, cooperative timeout, and local-only limitations apply.
 Nothing here demonstrates real-model language understanding or production readiness.
 
+## Reproducible offline evaluations (Sprint 4E-1)
+
+Run the versioned synthetic evaluation set without a development database or provider:
+
+```bash
+.venv/bin/python -m ai_operations_agent.evaluation --list
+.venv/bin/python -m ai_operations_agent.evaluation
+.venv/bin/python -m ai_operations_agent.evaluation --scenario selected-all-signals --scenario invalid-tool
+```
+
+Default outputs are ignored `evaluation-results/report.json` and `evaluation-results/summary.md`.
+`--output-dir` can select an ignored directory or a directory outside the repository. Exit codes
+are `0` when every required gate passes, `1` for gate failures, and `2` for invalid selection or
+execution/report errors. Duplicate or unknown scenario IDs fail closed. This is a separate entry
+point; the existing agent CLI and HTTP contracts are unchanged.
+
+`src/ai_operations_agent/evaluation_data/v1.json` declares **26 scenarios** in dataset
+`synthetic-agent-eval-v1`, separated into normal task success, security, and failure categories.
+Coverage includes scoped discovery, selected/named assessments, empty and healthy queues, each
+individual signal, all four signals, unknown/ambiguous names, unauthorized selection/calls,
+unsupported capabilities, adversarial questions, incorrect tools/arguments/queue selection,
+duplicate calls, fabricated evidence, incomplete/reordered recommendations, malformed outcomes,
+timeouts, unavailability, and refusal. Workflows and authorization come from trusted scenario
+fields, never question text. Frozen expectations are independently authored literals, validated
+before execution and never learned from agent output.
+
+Each run creates and disposes its own in-memory SQLite database with deterministic synthetic
+queues, operators, tickets, UTC evaluation time, and risk policy. It neither selects a database
+URL nor uses development rows. Tests additionally run the scenarios on the existing validated
+PostgreSQL test engine, committing/deleting only their own uniquely named fixtures. Fixture writes
+are separate from the observed runtime, which uses the existing read-only tools and risk/recommendation
+engines. No application schema creation or migrations change. The runner uses only the existing
+demo and scripted fake adapters. Responses telemetry is tested with the existing official SDK
+`MockTransport`; the runner has no live provider, credential, billing, or language-routing option.
+
+Reports include commit/dirty state, dataset/fixture versions, adapter/model identity, per-scenario
+checks, aggregate metrics, security violations, duration, usage, and limitations. Task completion
+includes only normal cases. Expected refusals/failures pass defense gates. Tool selection and exact
+argument metrics compare adapter requests to legal workflow prefixes, exclude zero-request cases,
+and include deliberately invalid scripted requests. Evidence grounding validates returned answers
+and retained sources. Recommendation checks compare every assessment with its literal expected
+catalog, including sources retained after a rejected answer. Failure/refusal rate includes every
+nonanswer and is descriptive. Numerators/denominators are explicit; absent applicability is `null`.
+Unauthorized dispatch, writes/attempts, invalid provenance/evidence, scope leaks, and incomplete
+request decisions are reported separately as hard security violations.
+
+Optional request-local telemetry records model turns and requested, accepted/rejected, dispatched,
+and successfully captured tool calls. Known labels and canonical SHA-256 fingerprints allow exact
+argument/snapshot comparisons without retaining values or transcripts. Successful sources alone
+are not a complete trace. Fake adapters report zero provider requests and **unknown** tokens.
+Failed/missing usage stays `null`; actual usage fields are used when present. The unused read-only
+cost interface requires an explicitly versioned price table with source and external-verification
+date; no prices ship. Amounts are estimates, not provider billing caps. Reports contain no raw
+questions, provider output/reasoning, keys, headers, SQL, connection strings, or private row content.
+
+Run the new suite explicitly, then the full checks below:
+
+```bash
+env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_evaluation_harness.py tests/test_evaluation_provider_telemetry.py
+```
+
+Reproducibility applies to outcomes/scores with identical fixtures and policy. Timing and Git state
+can differ, as can PostgreSQL sequence IDs/namespaces. Offline latency does not predict provider
+latency. This small scripted set establishes neither zero hallucinations nor real-model quality or
+production readiness. **Live model execution and live credential provisioning require separate approval.**
+
 ## Tests and quality checks
 
 ```bash
@@ -574,7 +640,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, and local offline Sprint 4D suites against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, local offline Sprint 4D, and offline Sprint 4E-1 suites against migrated PostgreSQL 16**. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:
