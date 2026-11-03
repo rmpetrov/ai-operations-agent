@@ -270,18 +270,24 @@ def score_scenario(scenario, fixtures, response, trace, observations, elapsed, *
     }
 
 
-def evaluate_scenario(scenario, fixtures):
-    trace = RuntimeTrace()
+def evaluate_scenario(scenario, fixtures, *, adapter=None, trace=None, limits=None, clock=None):
+    """Shared execution/scoring path; optional inputs are trusted local Python seams."""
+    trace = trace if trace is not None else RuntimeTrace()
     before = business_snapshot(fixtures.engine)
     response, unexpected = None, False
     start = perf_counter()
     with observe_reads(fixtures.engine) as observations:
         try:
+            runtime_options = {"limits": limits} if limits is not None else {}
+            if clock is not None:
+                runtime_options["clock"] = clock
             response = run_agent(
                 build_request(scenario, fixtures), build_access(scenario, fixtures),
-                build_adapter(scenario, fixtures), engine=fixtures.engine, trace=trace,
+                adapter if adapter is not None else build_adapter(scenario, fixtures),
+                engine=fixtures.engine, trace=trace,
                 new_id=(f"eval_{i}" for i in count()).__next__,
                 evaluation_context=EvaluationContext(EVALUATED_AT, RiskPolicy()),
+                **runtime_options,
             )
         except Exception:
             # Never serialize exception text, provider outputs, or connection configuration.

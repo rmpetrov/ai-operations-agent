@@ -10,6 +10,8 @@ live model invocations remain unapproved.
 Sprint 4D adds a local offline CLI that exercises the runtime using deterministic simulation
 and actual authorized database facts. It cannot enable a provider or infer intent from questions.
 Sprint 4E-1 adds versioned offline evaluations using isolated synthetic fixtures only.
+Sprint 4E-2A prepares a separately gated Responses smoke runner with an offline default and mocked
+transport tests only. Its actual live-execution path remains unexecuted and requires separate approval.
 
 ## Context
 
@@ -692,6 +694,84 @@ timing/usage, and limitations. They omit operational snapshots and transcripts. 
 Git-ignored. Determinism applies to scores/outcomes, not timing, Git state, or PostgreSQL IDs/namespaces.
 Scripted results do not measure language routing, real-model hallucination frequency, provider
 availability/latency, cost, or production readiness.
+
+## Controlled live smoke preparation (Sprint 4E-2A)
+
+`live_evaluation.py` adds a local entry point with an offline plan as its default. Its top-level
+imports are limited to pure schemas, dataset/usage/cost contracts, and a request-budget object.
+Backend configuration, runtime evaluation, fixture/database code, the Responses adapter, and SDK
+are imported only after execution preconditions pass. Import/default dry-run cannot load API
+credentials, read `.env`, construct clients/databases, make requests, or write reports. A fresh-process
+test blocks network, credential access, dotenv opens, and backend/provider imports to verify this boundary.
+
+Only three unchanged scenarios from `synthetic-agent-eval-v1` are used, in fixed order:
+`authorized-discovery`, `selected-all-signals`, and `named-assessment`. Their original trusted workflows,
+scopes, server selection, and independent expected results are preserved. Private in-memory SQLite is
+always constructed internally; development/test URLs never select a connection. The existing synthetic
+fixtures provide deterministic identities, records, time, and policy. `evaluation.evaluate_scenario`
+now accepts optional trusted Python adapter/trace/runtime-limits/clock seams; its default offline
+behavior, dispatcher, scorer, grounding rules, and read-only SQL observation are unchanged. There is
+no second runtime, dispatcher, recommendation engine, or scorer, and the offline CLI is unchanged.
+
+The future real-transport path requires all of: explicit `--live`, a process-only nonsecret opt-in
+marker `AGENT_LIVE_SMOKE_OPT_IN=approved-synthetic-smoke-v1`, interactive input/output, exact confirmation
+`RUN gpt-6-luna SYNTHETIC SMOKE`, enabled validated settings for the fixed `gpt-6-luna` model, and a
+nonblank process API key. Missing consent/configuration or an automated context fails before key access
+or client construction. Presence of `CI`, `GITHUB_ACTIONS`, `PYTEST_CURRENT_TEST`, or an imported pytest
+module blocks the real transport. No flags accept keys, database/base URLs, models, questions, grants,
+or arbitrary scenario IDs. These gates prevent accidental activation; they do not confer repository
+approval. **This milestone does not authorize live execution or credential provisioning.**
+
+Trusted tests may inject an official SDK client factory only through Python. Before any SDK request,
+that seam requires an `httpx.Client` whose default and mounted transports are `httpx.MockTransport`;
+an accidentally injected real transport is closed and rejected. No CLI option exposes it. Full mocked
+workflows test the actual SDK, native reasoning-item replay, `function_call_output` correlation,
+usage capture, runtime/tool/scorer calls, and resource cleanup. No raw reasoning is added to telemetry.
+
+`provider_budget.ProviderRequestBudget` is an invocation-local, shared, atomic ceiling of at most nine
+SDK requests across all scenarios; trusted code may lower it. It is passed through each Responses
+adapter's private run scope without resetting the counter. Reservation occurs immediately before
+`responses.create`, so authentication/rate-limit/network failures consume requests; missing credentials,
+expired deadlines before dispatch, and exhausted budgets do not create invented requests. The existing
+per-scenario three-request adapter ceiling, three model turns, and two serial tool calls remain. The
+runner stops on the first failed scenario, observed security violation, or exhausted global budget,
+without reruns, repair loops, retries, or recovery. Reaching a budget between scenarios leaves the
+remaining scenarios explicitly unexecuted; it never reports them as successes.
+
+Smoke output is capped at 2,048 tokens per request (including reasoning), with a nine-request output
+ceiling of 18,432. Input-token usage remains unknown until actual usage fields arrive; payload bytes
+are not a token/currency budget. The general runtime's ten-second default is unchanged. Smoke scenarios
+default to a scoped 30-second deadline to accommodate up to three serial calls, selectable only as
+10/20/30 seconds within existing validated bounds. Each SDK request is capped at ten seconds and the
+remaining scenario time. Existing size limits remain: 196,608 bytes for provider payload/conversation/
+response, 8,192 for model turns, 4,096 for question/arguments, 65,536 for tool results. These are local
+cooperative controls, not hard process/provider cancellation or guaranteed provider billing caps.
+
+Responses settings retain `store=False`, `parallel_tool_calls=False`, strict schemas, no hosted tools,
+and zero SDK retries. The fixed official endpoint still ignores `OPENAI_BASE_URL`. The proposed model
+is configured in trusted code only; no live account access/compatibility or latency was verified.
+Official [model](https://developers.openai.com/api/docs/models/gpt-6-luna) and
+[function-calling](https://developers.openai.com/api/docs/guides/function-calling) references document
+the intended API surface; this milestone does not add price assumptions or query billing.
+
+Reports retain existing sanitized evaluation principles, with workflow/model, model/tool request/
+dispatch/rejection counts, actual provider requests, returned outcome and exact tool/argument checks,
+grounding/provenance/recommendation checks, security violations, operational writes/attempts, per-case
+and whole-run elapsed durations, actual token fields, and versioned-price estimates only when supplied
+through the existing cost interface. Executed-case metrics use the existing aggregate function;
+planned-task completion includes unexecuted scenarios as incomplete. Scoring/cleanup exceptions fail
+the overall gates, keep observed request counts, and distinguish an unscored attempt from a scenario
+that never ran; their security audit is marked incomplete rather than asserting a clean audit.
+Blocked runs record zero executions and their sanitized reason. Missing usage/pricing
+stays unknown rather than zero. Reports contain no snapshots, questions, raw provider outputs,
+exceptions, encrypted reasoning, keys, headers, connection strings, or confidential row content.
+
+Dry-run prints only its plan. Future execution writes JSON/Markdown beneath ignored
+`evaluation-results/live-smoke/` by default. CLI exit 0 means dry-run or all execution gates passed;
+1 means blocked/failed execution, and 2 means invalid options/report-write failure. Option errors do
+not echo user values. The 26-scenario offline evaluator remains independent and retains its contracts.
+No successful live experiment, language understanding, real provider latency/cost, zero-hallucination
+claim, production reliability, or natural-language routing is established by this preparation.
 
 ## Future work (not implemented)
 
