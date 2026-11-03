@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4E-2A — controlled live smoke-test preparation, verified exclusively with mocked SDK transport. Dry-run is the default. The Sprint 4E-1 offline evaluation harness and Sprint 4D offline CLI remain available. Live model calls and live credential provisioning remain unapproved. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4E-2B — discovery-only live smoke preparation, verified exclusively with mocked SDK transport. Dry-run is the default; the future experiment is restricted to one synthetic scenario and two provider requests. The Sprint 4E-1 offline evaluation harness and Sprint 4D offline CLI remain available. Live model calls and live credential provisioning remain unapproved. Local development only; no authentication or public deployment.
 
 ## Tech stack
 
@@ -632,7 +632,7 @@ can differ, as can PostgreSQL sequence IDs/namespaces. Offline latency does not 
 latency. This small scripted set establishes neither zero hallucinations nor real-model quality or
 production readiness. **Live model execution and live credential provisioning require separate approval.**
 
-## Controlled smoke-test preparation (Sprint 4E-2A)
+## Discovery-only smoke-test preparation (Sprint 4E-2B)
 
 **Implementation and mocked verification only. This milestone does not approve live execution.**
 The separate entry point defaults to a sanitized offline execution plan:
@@ -646,9 +646,20 @@ The separate entry point defaults to a sanitized offline execution plan:
 Dry-run creates no provider client or database, reads no API credential or `.env`, imports no
 backend settings/provider SDK, writes no report files, and performs zero network requests.
 Environment credentials or opt-in markers alone cannot activate execution. The plan includes
-the fixed model, workflows, authorization scopes, all budgets, required gates, and unknown usage/cost.
+the `discovery-only` execution mode, fixed model, one workflow, authorization scope, all budgets,
+required gates, and unknown usage/cost.
 
-The fixed smoke set reuses the independently specified `synthetic-agent-eval-v1` expectations:
+The first future experiment is narrowed to `authorized-discovery`: discover exactly synthetic `all`
+and `healthy` queue identities in queue-ID order, then select the grounded structured final answer.
+This isolates the provider/tool/answer boundary before any queue assessment or recommendations and
+limits exposure to two requests. It reuses the original independently specified
+`synthetic-agent-eval-v1` expectations, runtime, and scorer. Success or failure ends the invocation;
+the assessment scenarios are outside this plan and are never reported as failed or skipped.
+
+Sprint 4E-2A's three-scenario capability remains available **only with mocked transport**, through
+trusted Python `SmokeSettings(execution_mode="mocked-suite", max_provider_requests=9)` and a verified
+official SDK `httpx.MockTransport` factory. The CLI exposes no suite/scenario selection, and a suite
+without that factory fails before credential access. Its retained regression coverage is:
 
 | Scenario | Trusted workflow and selection | Expected result |
 | --- | --- | --- |
@@ -664,11 +675,14 @@ the synthetic fixtures, `evaluate_scenario`, and its existing scorer/grounding v
 
 For a **future separately approved** live run, every gate must hold: explicit `--live`; process marker
 `AGENT_LIVE_SMOKE_OPT_IN=approved-synthetic-smoke-v1`; interactive stdin and stdout; exact confirmation
-`RUN gpt-6-luna SYNTHETIC SMOKE`; enabled trusted settings for the fixed model; and an API key already
-present in the process environment. Missing/declined consent fails before credential access. No key is
+`RUN gpt-6-luna SYNTHETIC DISCOVERY ONLY MAX 2 REQUESTS`; enabled trusted settings for the fixed model;
+and an API key already present in the process environment. Missing/declined consent fails before
+credential access. No key is
 accepted on the command line or written to disk. `CI`, `GITHUB_ACTIONS`, `PYTEST_CURRENT_TEST`, or a loaded
 pytest module block the real transport path, including when the other gates are satisfied. These local
 gates do not grant the separate human approval required by this repository's guardrails.
+After separate approval, the existing live option would apply these gates to discovery only; it
+cannot authorize or continue to the three-scenario suite.
 
 The configured proposed model is [`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna).
 The existing Responses adapter retains `store=False`, `parallel_tool_calls=False`, strict extra-forbidden
@@ -676,27 +690,31 @@ function/answer schemas, zero SDK retries, no hosted tools, and bounded stateles
 See official [function-calling documentation](https://developers.openai.com/api/docs/guides/function-calling).
 No live account/model access or runtime compatibility has been tested here.
 
-| Limit | Smoke runner |
+| Limit | Discovery-only runner |
 | --- | --- |
-| Global provider requests | At most 9 across all scenarios, including failed SDK requests; trusted Python can lower it |
-| Per-scenario requests / model turns / serial tools | 3 / 3 / 2 |
-| Output tokens | At most 2,048 per request, including reasoning; global output ceiling 18,432 |
+| Global provider requests | At most 2 for the entire invocation, including failed SDK requests; trusted Python can lower it |
+| Per-scenario requests / model turns / serial tools | 2 / 2 / 1; only `list_queues`, then no tools |
+| Output tokens | At most 2,048 per request, including reasoning; global output ceiling 4,096 |
 | Input tokens and cost | Unknown; byte bounds do not constitute a token or currency cap |
 | Scenario deadline | 30 seconds by default; only 10, 20, or 30 may be selected |
 | Individual SDK request timeout | At most 10 seconds, reduced to the remaining scenario deadline |
 | Provider payload / conversation / response | Each at most 196,608 UTF-8 bytes |
 | Model turn / tool arguments / tool result | 8,192 / 4,096 / 65,536 UTF-8 bytes |
 
-The general runtime's ten-second default remains unchanged. A smoke scenario can require three serial
-Responses calls, so its scoped deadline defaults to the existing validated 30-second maximum. This is
+The general runtime's ten-second default remains unchanged. The smoke runner retains its existing
+validated 30-second scoped deadline for the two serial Responses calls. This is
 a preparation choice, not a measured live-latency claim. Synchronous checks remain cooperative and HTTP
 timeouts bound individual network phases, not guaranteed process or provider cancellation. The runner
 stops on the first failed scenario, security violation, or exhausted global budget. It never reruns,
 repairs, retries, or recovers automatically. The shared budget is reserved immediately before each SDK
-request and survives private adapter-scope cleanup. A local budget is not a guaranteed provider billing cap.
+request and survives private adapter-scope cleanup. The mocked suite retains its 9 global / 3 per-scenario
+request ceilings and two serial tools for regression tests only. A local request/output limit is not a
+guaranteed API billing cap: input tokens are not capped in token units, missing usage/pricing is unknown,
+and local deadlines do not prove provider-side cancellation or final billed usage.
 
 Future execution reports default to ignored `evaluation-results/live-smoke/report.json` and `summary.md`.
-They record planned/executed/scored outcomes, unscored attempts and unexecuted scenarios, expected workflow,
+They record execution mode and request ceiling, one planned scenario, whether it was executed/scored,
+unscored attempts or an unexecuted planned scenario, terminal outcome, expected discovery scope/order,
 selected model, model/tool/request counts and sequences, exact argument/tool checks, grounding/provenance,
 recommendation membership/order, observed security violations and writes/attempts, elapsed durations, and
 actual usage fields. Both executed-case metrics and planned-task completion are reported; unexecuted
@@ -716,12 +734,13 @@ Tests inject only official SDK clients with `httpx.MockTransport`; the testing s
 and rejects an accidentally supplied real transport. It is unavailable from the CLI. Run mocked tests with:
 
 ```bash
-env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_live_evaluation.py
+env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_discovery_live_evaluation.py tests/test_live_evaluation.py
 ```
 
-The three scripted workflows and mocked results do not measure live model accuracy, natural-language
-routing, real provider latency, API cost, or production reliability. A small smoke set cannot establish
-zero hallucinations. The actual live path remains unexecuted in Sprint 4E-2A.
+The discovery script, retained three-workflow mocked suite, and their results do not measure live model
+accuracy, natural-language routing, real provider latency, API cost, or production reliability. A small smoke set cannot establish
+zero hallucinations. No actual live-model behavior or API cost has been measured; the actual live path
+remains unexecuted in Sprint 4E-2B.
 
 ## Tests and quality checks
 
@@ -731,7 +750,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, local offline Sprint 4D, offline Sprint 4E-1, and mocked Sprint 4E-2A suites against migrated PostgreSQL 16**. The smoke runner itself still uses private SQLite. The `db_test`
+Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, local offline Sprint 4D, offline Sprint 4E-1, and mocked Sprint 4E-2A/2B suites against migrated PostgreSQL 16**. The smoke runner itself still uses private SQLite. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:

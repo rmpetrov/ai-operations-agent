@@ -45,7 +45,9 @@ def consent():
 
 
 def settings(**overrides):
-    return SmokeSettings(provider_enabled=True, **overrides)
+    # Retain the Sprint 4E-2A full-suite regression coverage through the mocked-only seam.
+    return SmokeSettings(**{"provider_enabled": True, "execution_mode": "mocked-suite",
+                            "max_provider_requests": 9, **overrides})
 
 
 def discovery_draft():
@@ -152,7 +154,7 @@ def test_realistic_stateless_replay_and_call_output_correlation():
 
 
 def test_fixed_scenario_expectations_are_original_dataset_objects():
-    dataset, scenarios = live_evaluation.smoke_scenarios()
+    dataset, scenarios = live_evaluation.smoke_scenarios(settings())
     independent = load_dataset()
     assert [s.id for s in scenarios] == list(SCENARIO_IDS)
     for scenario in scenarios:
@@ -208,11 +210,12 @@ with patch.object(builtins, "__import__", imports), patch.object(os.environ, "ge
 def test_dry_plan_budgets_and_no_artifact_creation(tmp_path, capsys):
     assert live_evaluation.main(["--dry-run", "--output-dir", str(tmp_path / "unused")]) == 0
     plan = json.loads(capsys.readouterr().out)
-    assert plan["global_max_provider_requests"] == 9
+    assert plan["execution_mode"] == "discovery-only" and plan["scenario_count"] == 1
+    assert plan["global_max_provider_requests"] == 2
     assert plan["max_output_tokens_per_request"] == 2048
-    assert plan["global_max_output_tokens"] == 18432
+    assert plan["global_max_output_tokens"] == 4096
     assert plan["input_token_budget"] is None
-    assert plan["max_model_turns_per_scenario"] == 3 and plan["max_tool_requests_per_scenario"] == 2
+    assert plan["max_model_turns_per_scenario"] == 2 and plan["max_tool_requests_per_scenario"] == 1
     assert plan["scenario_timeout_seconds"] == 30 and plan["request_timeout_seconds"] == 10
     assert all(v is None for v in plan["usage"].values())
     assert not (tmp_path / "unused").exists()
@@ -228,7 +231,7 @@ def test_missing_preconditions_fail_closed_before_client_or_database(monkeypatch
     if mutation == "consent":
         permission = None
     elif mutation == "disabled":
-        config = SmokeSettings()
+        config = settings(provider_enabled=False)
     elif mutation == "model":
         config = config.model_copy(update={"model_id": "SECRET_UNSUPPORTED_MODEL"})
     else:
@@ -236,7 +239,7 @@ def test_missing_preconditions_fail_closed_before_client_or_database(monkeypatch
     report = run_smoke(config, permission, client_factory=provider.factory)
     assert report["stop_reason"] == reason and not report["required_gates_passed"]
     assert report["provider_request_count"] == report["executed_scenario_count"] == 0
-    assert len(report["not_run"]) == 3
+    assert len(report["not_run"]) == (1 if mutation == "model" else 3)
     assert provider.client_options == provider.requests == []
     assert "SECRET" not in json.dumps(report)
 
@@ -249,7 +252,7 @@ def test_pytest_cannot_activate_real_client_even_with_consent(monkeypatch):
         return original_get(name, *args)
 
     monkeypatch.setattr(os.environ, "get", no_key)
-    report = run_smoke(settings(), consent())
+    report = run_smoke(SmokeSettings(provider_enabled=True), consent())
     assert report["stop_reason"] == "automated_live_execution_blocked"
     assert report["provider_request_count"] == 0
 
@@ -267,7 +270,7 @@ def test_cli_live_blocked_under_tests_without_prompt_or_key(monkeypatch, tmp_pat
     assert live_evaluation.main(["--live", "--output-dir", str(tmp_path)]) == 1
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["stop_reason"] == "automated_live_execution_blocked"
-    assert report["provider_request_count"] == 0 and len(report["not_run"]) == 3
+    assert report["provider_request_count"] == 0 and len(report["not_run"]) == 1
     assert "mock-provider-sentinel" not in capsys.readouterr().out
 
 

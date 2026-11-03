@@ -13,7 +13,7 @@ from pathlib import Path
 from time import monotonic, perf_counter
 from typing import Annotated, Literal
 
-from pydantic import Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from ai_operations_agent.agent_telemetry import RuntimeTrace, TokenUsage, total_usage
 from ai_operations_agent.evaluation_costs import VerifiedPriceTable, estimate_cost
@@ -22,19 +22,22 @@ from ai_operations_agent.provider_budget import MAX_SMOKE_REQUESTS, ProviderRequ
 from ai_operations_agent.tool_schemas import StrictValue
 
 SCENARIO_IDS = ("authorized-discovery", "selected-all-signals", "named-assessment")
+DISCOVERY_SCENARIO_IDS = ("authorized-discovery",)
+DISCOVERY_MAX_REQUESTS = 2
 MODEL_ID = "gpt-6-luna"
 OPT_IN_VARIABLE = "AGENT_LIVE_SMOKE_OPT_IN"
 OPT_IN_VALUE = "approved-synthetic-smoke-v1"
-CONFIRMATION = "RUN gpt-6-luna SYNTHETIC SMOKE"
+CONFIRMATION = "RUN gpt-6-luna SYNTHETIC DISCOVERY ONLY MAX 2 REQUESTS"
 
 
 class SmokeSettings(StrictValue):
+    execution_mode: Literal["discovery-only", "mocked-suite"] = "discovery-only"
     provider_enabled: bool = False
     model_id: Literal["gpt-6-luna"] = MODEL_ID
     # Scoped to this smoke runner; general runtime and offline CLI defaults stay at 10s.
     scenario_timeout_seconds: Literal[10, 20, 30] = 30
     request_timeout_seconds: Annotated[int, Field(ge=1, le=10)] = 10
-    max_provider_requests: Annotated[int, Field(ge=1, le=MAX_SMOKE_REQUESTS)] = 9
+    max_provider_requests: Annotated[int, Field(ge=1, le=MAX_SMOKE_REQUESTS)] = 2
     max_output_tokens: Annotated[int, Field(ge=16, le=2048)] = 2048
 
     @field_validator("scenario_timeout_seconds", mode="before")
@@ -44,10 +47,28 @@ class SmokeSettings(StrictValue):
             raise ValueError("scenario timeout must be an integer")
         return value
 
+    @model_validator(mode="after")
+    def discovery_budget(self):
+        if self.execution_mode == "discovery-only" and self.max_provider_requests > DISCOVERY_MAX_REQUESTS:
+            raise ValueError("discovery permits at most two provider requests")
+        return self
+
+    @property
+    def scenario_ids(self):
+        return DISCOVERY_SCENARIO_IDS if self.execution_mode == "discovery-only" else SCENARIO_IDS
+
+    @property
+    def max_model_turns(self):
+        return 2 if self.execution_mode == "discovery-only" else 3
+
+    @property
+    def max_tool_requests(self):
+        return 1 if self.execution_mode == "discovery-only" else 2
+
 
 class SmokeConsent(StrictValue):
     opted_in: Literal[True]
-    confirmation: Literal["RUN gpt-6-luna SYNTHETIC SMOKE"]
+    confirmation: Literal["RUN gpt-6-luna SYNTHETIC DISCOVERY ONLY MAX 2 REQUESTS"]
 
     @field_validator("opted_in", mode="before")
     @classmethod
@@ -57,37 +78,49 @@ class SmokeConsent(StrictValue):
         return value
 
 
-def smoke_scenarios():
+def smoke_scenarios(settings: SmokeSettings | None = None):
+    settings = settings or SmokeSettings()
     dataset = load_dataset()
     by_id = {scenario.id: scenario for scenario in dataset.scenarios}
-    scenarios = tuple(by_id[id] for id in SCENARIO_IDS)
+    scenarios = tuple(by_id[id] for id in settings.scenario_ids)
     if any(s.category != "task_success" or s.expected.status != "answered" for s in scenarios):
         raise ValueError("invalid smoke dataset")
     return dataset, scenarios
 
 
+def _planned_scenarios(scenarios):
+    return [{"scenario_id": s.id, "workflow": s.request.workflow,
+             "authorized_queue_scope": list(s.authorized_queue_scope),
+             "selected_queue": s.selected_queue,
+             "expected_status": s.expected.status,
+             "expected_recommendation_codes": list(s.expected.recommendation_codes)
+             if s.expected.recommendation_codes is not None else None,
+             "expected_discovery_queue_keys": list(s.authorized_queue_scope)
+             if s.request.workflow == "discovery" else None,
+             "expected_discovery_order": "queue-id-ascending"
+             if s.request.workflow == "discovery" else None}
+            for s in scenarios]
+
+
 def execution_plan(settings: SmokeSettings | None = None) -> dict:
     settings = settings or SmokeSettings()
     settings = SmokeSettings.model_validate_json(settings.model_dump_json(), strict=True)
-    dataset, scenarios = smoke_scenarios()
+    dataset, scenarios = smoke_scenarios(settings)
     return {
         "schema_version": "live-smoke-plan-v1", "mode": "offline-dry-run",
+        "execution_mode": settings.execution_mode, "scenario_count": len(scenarios),
         "live_execution_approved_by_this_milestone": False,
         "dataset_version": dataset.version, "fixture_version": dataset.fixture_version,
-        "scenarios": [{"scenario_id": s.id, "workflow": s.request.workflow,
-                       "authorized_queue_scope": list(s.authorized_queue_scope),
-                       "selected_queue": s.selected_queue,
-                       "expected_status": s.expected.status,
-                       "expected_recommendation_codes": s.expected.recommendation_codes}
-                      for s in scenarios],
+        "scenarios": _planned_scenarios(scenarios),
         "database": "private-in-memory-sqlite-synthetic-only",
         "model_id": settings.model_id, "provider_enabled": False,
         "global_max_provider_requests": settings.max_provider_requests,
-        "max_provider_requests_per_scenario": 3,
+        "max_provider_requests_per_scenario": settings.max_model_turns,
         "max_output_tokens_per_request": settings.max_output_tokens,
         "global_max_output_tokens": settings.max_provider_requests * settings.max_output_tokens,
         "input_token_budget": None,
-        "max_tool_requests_per_scenario": 2, "max_model_turns_per_scenario": 3,
+        "max_tool_requests_per_scenario": settings.max_tool_requests,
+        "max_model_turns_per_scenario": settings.max_model_turns,
         "scenario_timeout_seconds": settings.scenario_timeout_seconds,
         "request_timeout_seconds": settings.request_timeout_seconds,
         "request_timeout_capped_by_remaining_runtime": True,
@@ -123,6 +156,8 @@ def _precondition(settings, consent, client_factory):
         return "invalid_model_settings"
     if not settings.provider_enabled:
         return "provider_disabled"
+    if settings.execution_mode == "mocked-suite" and client_factory is None:
+        return "mocked_suite_requires_mock_transport"
     try:
         SmokeConsent.model_validate_json(consent.model_dump_json(), strict=True)
     except (AttributeError, ValidationError, ValueError, TypeError):
@@ -143,16 +178,19 @@ def _precondition(settings, consent, client_factory):
 
 
 def _initial_report(settings, *, mocked):
-    dataset, scenarios = smoke_scenarios()
     try:
         safe_limits = SmokeSettings.model_validate_json(settings.model_dump_json(), strict=True)
     except (AttributeError, ValidationError, ValueError, TypeError):
         safe_limits = SmokeSettings()
+    dataset, scenarios = smoke_scenarios(safe_limits)
     return {
         "schema_version": "live-smoke-report-v1", "dataset_version": dataset.version,
         "fixture_version": dataset.fixture_version, "git": None,
         "adapter_type": "mocked-openai-responses" if mocked else "openai-responses",
         "mode": "mocked" if mocked else "live", "model_id": MODEL_ID,
+        "execution_mode": safe_limits.execution_mode,
+        "global_max_provider_requests": safe_limits.max_provider_requests,
+        "planned_scenarios": _planned_scenarios(scenarios),
         "scenario_count": len(scenarios), "executed_scenario_count": 0,
         "passed": 0, "failed": 0, "required_gates_passed": False,
         "results": [], "not_run": [], "unscored_attempts": [], "metrics": None,
@@ -160,7 +198,7 @@ def _initial_report(settings, *, mocked):
         "model_turn_count": 0, "tool_request_count": 0, "tool_dispatch_count": 0,
         "tool_rejection_count": 0,
         "usage": TokenUsage().model_dump(), "cost": estimate_cost(TokenUsage(), MODEL_ID),
-        "elapsed_seconds": 0.0, "stop_reason": None,
+        "elapsed_seconds": 0.0, "stop_reason": None, "terminal_outcome": "not_attempted",
         "limits": safe_limits.model_dump(),
         "limitations": ["Synthetic smoke set only; no natural-language workflow routing.",
                         "Mocked transport does not measure live model behavior, latency, or API cost.",
@@ -213,7 +251,9 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
     """
     start = perf_counter()
     report = _initial_report(settings, mocked=client_factory is not None)
-    _, scenarios = smoke_scenarios()
+    # Use only validated settings to select a plan, including on blocked/invalid runs.
+    safe_settings = SmokeSettings.model_validate(report["limits"], strict=True)
+    _, scenarios = smoke_scenarios(safe_settings)
     reason = _precondition(settings, consent, client_factory)
     if reason is None and prices is not None:
         try:
@@ -225,6 +265,7 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
         _not_run(report, scenarios, reason)
         report["elapsed_seconds"] = perf_counter() - start
         return report
+    settings = safe_settings
     report["limits"] = settings.model_dump()
     # Imports below may load normal backend configuration, but only explicit private
     # SQLite engines, fixed time/policy, and dataset-owned authorization are ever used.
@@ -239,11 +280,12 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
         report["git"] = evaluation.git_metadata()
         provider = ResponsesSettings(
             enabled=True, model_id=settings.model_id, timeout_seconds=settings.request_timeout_seconds,
-            max_output_tokens=settings.max_output_tokens, max_requests=3,
+            max_output_tokens=settings.max_output_tokens, max_requests=settings.max_model_turns,
             max_argument_bytes=4096, max_payload_bytes=196608,
         )
         limits = RuntimeLimits(timeout_seconds=settings.scenario_timeout_seconds,
-                               max_model_turns=3, max_tool_requests=2)
+                               max_model_turns=settings.max_model_turns,
+                               max_tool_requests=settings.max_tool_requests)
         factory = _mocked_client_factory(client_factory) if client_factory is not None else None
         with synthetic_database() as fixtures:
             for scenario in scenarios:
@@ -310,6 +352,8 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
     report["required_gates_passed"] = (len(report["results"]) == len(scenarios)
                                        and all(r["passed"] for r in report["results"])
                                        and report["stop_reason"] is None)
+    report["terminal_outcome"] = ("incomplete_audit" if not report["security_audit_complete"] else
+                                  "passed" if report["required_gates_passed"] else "failed")
     report["elapsed_seconds"] = perf_counter() - start
     return report
 
@@ -317,6 +361,9 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
 def report_markdown(report):
     lines = ["# Controlled synthetic smoke test", "",
              f"Mode: {report['mode']}; model: {report['model_id']}; dataset: {report['dataset_version']}.",
+             f"Execution mode: {report['execution_mode']}; "
+             f"provider request ceiling: {report['global_max_provider_requests']}; "
+             f"terminal outcome: {report['terminal_outcome']}.",
              f"Required gates: {'PASS' if report['required_gates_passed'] else 'FAIL'}; "
              f"stop reason: {report['stop_reason'] or 'none'}.",
              f"Planned: {report['scenario_count']}; executed: {report['executed_scenario_count']}; "
@@ -325,13 +372,24 @@ def report_markdown(report):
              f"Provider requests: {report['provider_request_count']}; tokens: "
              f"{report['usage']['total_tokens'] if report['usage']['total_tokens'] is not None else 'unknown'}; "
              f"estimated USD: {report['cost']['estimated_usd'] if report['cost']['estimated_usd'] is not None else 'unknown'}.",
+             f"Tool requests: {report['tool_request_count']}; dispatches: {report['tool_dispatch_count']}; "
+             f"rejections: {report['tool_rejection_count']}.",
              f"Elapsed seconds: {report['elapsed_seconds']:.6f}.", "",
              "| Scenario | Workflow | Status | Gate |", "| --- | --- | --- | --- |"]
     lines += [f"| {r['scenario_id']} | {r['workflow']} | {r['status']} | {'PASS' if r['passed'] else 'FAIL'} |"
               for r in report["results"]]
-    lines += [f"| {r['scenario_id']} | {r['workflow']} | not run | FAIL |" for r in report["not_run"]]
+    lines += [f"| {r['scenario_id']} | {r['workflow']} | not run | unexecuted |" for r in report["not_run"]]
     lines += [f"| {r['scenario_id']} | {r['workflow']} | {r['status']} | FAIL |"
               for r in report["unscored_attempts"]]
+    for planned in report["planned_scenarios"]:
+        if planned["expected_discovery_queue_keys"] is not None:
+            lines += ["", f"Expected discovery ({planned['scenario_id']}): "
+                      f"{', '.join(planned['expected_discovery_queue_keys'])}; "
+                      f"order: {planned['expected_discovery_order']}."]
+    for result in report["results"]:
+        lines += [f"{result['scenario_id']}: exact discovery: "
+                  f"{result['checks']['discovery_membership_order']}; "
+                  f"grounding / provenance / authorized scope: {result['checks']['evidence_grounding']}."]
     lines += ["", "Recorded security violations: " + (", ".join(
         f"{r['scenario_id']}: {r['violation']}" for r in report["security_violations"]
     ) or "none"), f"Executed-scenario security audit complete: {report['security_audit_complete']}.", ""]
@@ -353,7 +411,8 @@ def _cli_consent():
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None, "interactive_confirmation_required"
     try:
-        answer = input(f"Separate live approval required. Type {CONFIRMATION}: ")
+        answer = input("Separate live approval required. Discovery only: authorized-discovery; "
+                       f"at most two provider requests, no assessment. Type {CONFIRMATION}: ")
     except (EOFError, KeyboardInterrupt):
         return None, "missing_explicit_consent"
     if answer != CONFIRMATION:
@@ -364,7 +423,8 @@ def _cli_consent():
 def main(argv=None):
     parser = _Parser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--live", action="store_true", help="Requires separate approval and interactive consent")
+    mode.add_argument("--live", action="store_true",
+                      help="Discovery only, at most 2 requests; requires separate approval and consent")
     mode.add_argument("--dry-run", action="store_true", help="Offline plan (the default)")
     parser.add_argument("--scenario-timeout-seconds", type=int, choices=(10, 20, 30), default=30)
     parser.add_argument("--output-dir", type=Path, default=Path("evaluation-results/live-smoke"))
@@ -378,7 +438,7 @@ def main(argv=None):
     if reason:
         report = _initial_report(settings, mocked=False)
         report["stop_reason"] = reason
-        _, scenarios = smoke_scenarios()
+        _, scenarios = smoke_scenarios(settings)
         _not_run(report, scenarios, reason)
     else:
         report = run_smoke(settings, consent)
