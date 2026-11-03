@@ -4,7 +4,7 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4E-1 — reproducible offline evaluations with versioned synthetic scenarios and isolated fixtures, alongside the Sprint 4D offline CLI. The Sprint 4C provider adapter is verified through mocked SDK transport only. Live model calls and live credential provisioning remain unapproved. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4E-2A — controlled live smoke-test preparation, verified exclusively with mocked SDK transport. Dry-run is the default. The Sprint 4E-1 offline evaluation harness and Sprint 4D offline CLI remain available. Live model calls and live credential provisioning remain unapproved. Local development only; no authentication or public deployment.
 
 ## Tech stack
 
@@ -632,6 +632,97 @@ can differ, as can PostgreSQL sequence IDs/namespaces. Offline latency does not 
 latency. This small scripted set establishes neither zero hallucinations nor real-model quality or
 production readiness. **Live model execution and live credential provisioning require separate approval.**
 
+## Controlled smoke-test preparation (Sprint 4E-2A)
+
+**Implementation and mocked verification only. This milestone does not approve live execution.**
+The separate entry point defaults to a sanitized offline execution plan:
+
+```bash
+.venv/bin/python -m ai_operations_agent.live_evaluation
+.venv/bin/python -m ai_operations_agent.live_evaluation --dry-run
+.venv/bin/python -m ai_operations_agent.live_evaluation --scenario-timeout-seconds 20
+```
+
+Dry-run creates no provider client or database, reads no API credential or `.env`, imports no
+backend settings/provider SDK, writes no report files, and performs zero network requests.
+Environment credentials or opt-in markers alone cannot activate execution. The plan includes
+the fixed model, workflows, authorization scopes, all budgets, required gates, and unknown usage/cost.
+
+The fixed smoke set reuses the independently specified `synthetic-agent-eval-v1` expectations:
+
+| Scenario | Trusted workflow and selection | Expected result |
+| --- | --- | --- |
+| `authorized-discovery` | Discovery within synthetic `all` and `healthy` scope | Both queue identities, in ID order |
+| `selected-all-signals` | Assessment of server-selected synthetic `all` queue | All four recommendations, in canonical order |
+| `named-assessment` | Scoped discovery, then exact synthetic `healthy` name resolution | Answer with no triggered recommendations |
+
+Execution always creates its own private in-memory SQLite database. Neither `DATABASE_URL` nor
+`TEST_DATABASE_URL` chooses its connection. No database URL, model, base URL, question, queue scope,
+credentials, provider tools, or arbitrary scenario switches are accepted as CLI arguments. The existing
+deterministic CLI stays offline. The runner reuses `run_agent`, `OpenAIResponsesAdapter`, `RuntimeTrace`,
+the synthetic fixtures, `evaluate_scenario`, and its existing scorer/grounding validation.
+
+For a **future separately approved** live run, every gate must hold: explicit `--live`; process marker
+`AGENT_LIVE_SMOKE_OPT_IN=approved-synthetic-smoke-v1`; interactive stdin and stdout; exact confirmation
+`RUN gpt-6-luna SYNTHETIC SMOKE`; enabled trusted settings for the fixed model; and an API key already
+present in the process environment. Missing/declined consent fails before credential access. No key is
+accepted on the command line or written to disk. `CI`, `GITHUB_ACTIONS`, `PYTEST_CURRENT_TEST`, or a loaded
+pytest module block the real transport path, including when the other gates are satisfied. These local
+gates do not grant the separate human approval required by this repository's guardrails.
+
+The configured proposed model is [`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna).
+The existing Responses adapter retains `store=False`, `parallel_tool_calls=False`, strict extra-forbidden
+function/answer schemas, zero SDK retries, no hosted tools, and bounded stateless continuation.
+See official [function-calling documentation](https://developers.openai.com/api/docs/guides/function-calling).
+No live account/model access or runtime compatibility has been tested here.
+
+| Limit | Smoke runner |
+| --- | --- |
+| Global provider requests | At most 9 across all scenarios, including failed SDK requests; trusted Python can lower it |
+| Per-scenario requests / model turns / serial tools | 3 / 3 / 2 |
+| Output tokens | At most 2,048 per request, including reasoning; global output ceiling 18,432 |
+| Input tokens and cost | Unknown; byte bounds do not constitute a token or currency cap |
+| Scenario deadline | 30 seconds by default; only 10, 20, or 30 may be selected |
+| Individual SDK request timeout | At most 10 seconds, reduced to the remaining scenario deadline |
+| Provider payload / conversation / response | Each at most 196,608 UTF-8 bytes |
+| Model turn / tool arguments / tool result | 8,192 / 4,096 / 65,536 UTF-8 bytes |
+
+The general runtime's ten-second default remains unchanged. A smoke scenario can require three serial
+Responses calls, so its scoped deadline defaults to the existing validated 30-second maximum. This is
+a preparation choice, not a measured live-latency claim. Synchronous checks remain cooperative and HTTP
+timeouts bound individual network phases, not guaranteed process or provider cancellation. The runner
+stops on the first failed scenario, security violation, or exhausted global budget. It never reruns,
+repairs, retries, or recovers automatically. The shared budget is reserved immediately before each SDK
+request and survives private adapter-scope cleanup. A local budget is not a guaranteed provider billing cap.
+
+Future execution reports default to ignored `evaluation-results/live-smoke/report.json` and `summary.md`.
+They record planned/executed/scored outcomes, unscored attempts and unexecuted scenarios, expected workflow,
+selected model, model/tool/request counts and sequences, exact argument/tool checks, grounding/provenance,
+recommendation membership/order, observed security violations and writes/attempts, elapsed durations, and
+actual usage fields. Both executed-case metrics and planned-task completion are reported; unexecuted
+cases never masquerade as successes. Failures after requests or during cleanup preserve observed counts
+and fail the overall gates; unscored/cleanup failures mark the security audit incomplete. Exit codes:
+`0` dry-run or all execution gates passed; `1` blocked/failed smoke
+test; `2` invalid options or report-write failure. Unknown/credential-like option values are not echoed.
+
+Only sanitized metadata and fingerprints are persisted. Raw questions/outputs, SDK exceptions, provider
+transcripts, encrypted reasoning, headers, keys, connection strings, ticket subjects, and operator names
+are omitted. Missing usage on any contributing request leaves that aggregate field unknown. Cost remains
+unknown unless trusted Python supplies the existing explicitly versioned, externally verified price table;
+no prices or billing queries ship. Adapter protocol/authentication/rate-limit errors retain the existing
+sanitized `model_unavailable` classification; timeouts retain `deadline_exceeded`.
+
+Tests inject only official SDK clients with `httpx.MockTransport`; the testing seam verifies the transport
+and rejects an accidentally supplied real transport. It is unavailable from the CLI. Run mocked tests with:
+
+```bash
+env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_live_evaluation.py
+```
+
+The three scripted workflows and mocked results do not measure live model accuracy, natural-language
+routing, real provider latency, API cost, or production reliability. A small smoke set cannot establish
+zero hallucinations. The actual live path remains unexecuted in Sprint 4E-2A.
+
 ## Tests and quality checks
 
 ```bash
@@ -640,7 +731,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q  # in-memory SQLite
 git diff --check
 ```
 
-Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, local offline Sprint 4D, and offline Sprint 4E-1 suites against migrated PostgreSQL 16**. The `db_test`
+Run the **same API, Feature 001–003, Sprint 4A, offline Sprint 4B, mocked Sprint 4C, local offline Sprint 4D, offline Sprint 4E-1, and mocked Sprint 4E-2A suites against migrated PostgreSQL 16**. The smoke runner itself still uses private SQLite. The `db_test`
 service binds only to `127.0.0.1:5434`, uses database `ai_operations_test`, and stores data
 in `postgres_test_data`, independently of the development `db` service on port 5433.
 From the repository root:

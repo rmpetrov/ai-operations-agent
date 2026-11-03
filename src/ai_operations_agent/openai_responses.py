@@ -25,6 +25,7 @@ from ai_operations_agent.agent_schemas import (
     ToolRequest,
 )
 from ai_operations_agent.agent_telemetry import RuntimeTrace
+from ai_operations_agent.provider_budget import ProviderRequestBudget
 from ai_operations_agent.tool_schemas import (
     ListQueuesArguments,
     QueueRecommendationsArguments,
@@ -119,11 +120,13 @@ class OpenAIResponsesAdapter:
         client_factory: Callable[..., Any] | None = None,
         clock: Callable[[], float] = monotonic,
         trace: RuntimeTrace | None = None,
+        request_budget: ProviderRequestBudget | None = None,
     ):
         self.settings = settings or ResponsesSettings()
         self._factory = client_factory
         self._clock = clock
         self._trace = trace
+        self._request_budget = request_budget
         self._client = None
         self._history: list[dict] = []
         self._conversation: tuple[dict, ...] = ()
@@ -135,7 +138,7 @@ class OpenAIResponsesAdapter:
     @contextmanager
     def open_run(self) -> Iterator["OpenAIResponsesAdapter"]:
         run = OpenAIResponsesAdapter(self.settings, client_factory=self._factory, clock=self._clock,
-                                     trace=self._trace)
+                                     trace=self._trace, request_budget=self._request_budget)
         try:
             yield run
         finally:
@@ -259,6 +262,8 @@ class OpenAIResponsesAdapter:
     def next_turn(self, conversation, permitted_tools, response_schema, deadline) -> ModelTurn:
         if self._closed or not self.settings.enabled or self._requests >= self.settings.max_requests:
             return self._terminal(ModelFailure(reason="unavailable"))
+        if self._request_budget is not None and self._request_budget.exhausted:
+            return self._terminal(ModelFailure(reason="unavailable"))
         try:
             timeout = self._remaining(deadline)
             if (response_schema != StructuredAnswerDraft.model_json_schema()
@@ -295,6 +300,8 @@ class OpenAIResponsesAdapter:
             self._bounded(kwargs)
             # Recheck after preparation/client construction so they consume the same deadline.
             kwargs["timeout"] = self._remaining(deadline)
+            if self._request_budget is not None and not self._request_budget.reserve():
+                return self._terminal(ModelFailure(reason="unavailable"))
             self._requests += 1
             if self._trace is not None:
                 self._trace.provider_request()
