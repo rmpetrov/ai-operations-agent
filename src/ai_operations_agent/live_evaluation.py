@@ -136,7 +136,7 @@ def execution_plan(settings: SmokeSettings | None = None) -> dict:
                                 f"process {OPT_IN_VARIABLE}={OPT_IN_VALUE}",
                                 "interactive TTY confirmation", "not pytest or CI",
                                 "enabled trusted model configuration", "process API credential"],
-        "limitations": ["No live compatibility, latency, quality, or cost has been measured.",
+        "limitations": ["Offline plan only; this invocation measures no live behavior, latency, or API cost.",
                         "Token ceilings include reasoning output; input tokens and cost are unknown.",
                         "Local budgets are not guaranteed provider billing caps.",
                         "Deadlines are cooperative; HTTP timeouts apply to individual network phases."],
@@ -201,9 +201,17 @@ def _initial_report(settings, *, mocked):
         "elapsed_seconds": 0.0, "stop_reason": None, "terminal_outcome": "not_attempted",
         "limits": safe_limits.model_dump(),
         "limitations": ["Synthetic smoke set only; no natural-language workflow routing.",
-                        "Mocked transport does not measure live model behavior, latency, or API cost.",
-                        "Outcomes may vary with live models; timing, Git metadata and usage can differ.",
-                        "Missing usage/pricing is unknown. Local estimates are not provider billing caps.",
+                        f"Scope is limited to {len(scenarios)} planned synthetic "
+                        f"{'scenario' if len(scenarios) == 1 else 'scenarios'}; "
+                        "outcomes provide no reliability estimate or production-readiness claim.",
+                        *(
+                            ["Mocked transport does not measure live model behavior, latency, or API cost."]
+                            if mocked else
+                            ["Live observations apply only to this invocation; actual billed API cost is not verified by this report."]
+                        ),
+                        "Outcomes, timing, Git metadata and token usage can differ across invocations.",
+                        "Missing usage/pricing is unknown. Cost estimates require verified pricing; "
+                        "estimates are not actual billed cost or provider billing caps.",
                         "Adapter protocol rejections appear as model_unavailable; raw candidates are not runtime requests.",
                         "Cooperative deadlines do not guarantee process cancellation or provider-side cancellation."],
     }
