@@ -3,17 +3,22 @@
 ## Purpose
 
 Simulate three customer-support queues and provide a reliable, explainable source of
-operational facts. **No live LLM, autonomous writes, automation, or irreversible action.**
+operational facts. **No autonomous writes, automation, public deployment, or irreversible action.**
+Application/provider defaults remain offline. PR #11 records one completed, operator-reported
+[live synthetic discovery experiment](LIVE_DISCOVERY_CASE_STUDY.md); further live calls require
+separate approval, and actual billed cost remains unverified.
 Sprint 4B adds an internal runtime driven only by trusted scripted fake-model outcomes.
 Sprint 4C adds an optional Responses transport verified with mocked provider responses only;
-live model invocations remain unapproved.
+further live model invocations remain unapproved.
 Sprint 4D adds a local offline CLI that exercises the runtime using deterministic simulation
 and actual authorized database facts. It cannot enable a provider or infer intent from questions.
 Sprint 4E-1 adds versioned offline evaluations using isolated synthetic fixtures only.
-Sprint 4E-2A prepares a separately gated Responses smoke runner with an offline default and mocked
-transport tests only. Its actual live-execution path remains unexecuted and requires separate approval.
-Sprint 4E-2B restricts that future experiment to synthetic discovery only, with two provider requests
+Sprint 4E-2A prepared a separately gated Responses smoke runner with an offline default and mocked
+transport tests only. Live execution was not authorized by that milestone.
+Sprint 4E-2B restricted the first separately approved experiment to synthetic discovery only, with two provider requests
 and one read-only tool call; the original three-scenario suite remains mocked-only.
+Sprint 4E-2D prepares a separately gated single-scenario assessment through the same runner/scorer.
+This assessment preparation is offline/mocked only: no live assessment has executed or been approved.
 
 ## Context
 
@@ -697,7 +702,7 @@ Git-ignored. Determinism applies to scores/outcomes, not timing, Git state, or P
 Scripted results do not measure language routing, real-model hallucination frequency, provider
 availability/latency, cost, or production readiness.
 
-## Discovery-only live smoke preparation (Sprint 4E-2B)
+## Controlled live smoke preparation (Sprint 4E-2B / 4E-2D)
 
 `live_evaluation.py` adds a local entry point with an offline plan as its default. Its top-level
 imports are limited to pure schemas, dataset/usage/cost contracts, and a request-budget object.
@@ -706,7 +711,7 @@ are imported only after execution preconditions pass. Import/default dry-run can
 credentials, read `.env`, construct clients/databases, make requests, or write reports. A fresh-process
 test blocks network, credential access, dotenv opens, and backend/provider imports to verify this boundary.
 
-The default and only CLI execution mode is `discovery-only`: exactly the unchanged
+The default CLI execution mode remains `discovery-only`: exactly the unchanged
 `authorized-discovery` scenario from `synthetic-agent-eval-v1`, with its original workflow, authorized
 `all`/`healthy` scope, and independent expectations. It requires one `list_queues` call and a grounded
 structured answer referencing every authorized queue in queue-ID order. No assessment tool is offered
@@ -719,6 +724,27 @@ now accepts optional trusted Python adapter/trace/runtime-limits/clock seams; it
 behavior, dispatcher, scorer, grounding rules, and read-only SQL observation are unchanged. There is
 no second runtime, dispatcher, recommendation engine, or scorer, and the offline CLI is unchanged.
 
+Explicit `--execution-mode assessment-only` selects only the original `selected-all-signals`
+dataset object: `queue_assessment`, authorized `all`/`healthy` scope narrowed by selected queue
+`all`, and the original independent expectation. `evaluation.build_access` resolves the selected
+ID through the private synthetic fixtures; application logic contains no fixture ID literals.
+The Responses adapter receives that resolved ID through a trusted Python constructor argument
+and discloses it as `trusted_selection` in the model-facing JSON request. This supplies the
+otherwise absent selected target without adding discovery. It conveys no permission: the runtime
+independently compares every argument with its selected queue and allowlist before dispatch.
+Neither questions, tool output, environment, nor CLI options can configure this context. Adapter
+run scopes preserve it; normal discovery requests retain their original JSON request shape.
+
+Assessment offers only `get_queue_recommendations`, once, followed by a turn offering no tools.
+Two provider requests/model turns and one tool request are the ceilings. Any outcome terminates
+the invocation, including partial/reordered recommendations, wrong tool/queue, malformed output,
+invalid/fabricated/missing evidence, provider errors, budgets, or security violations. There are
+no repair, retry, discovery, or recovery paths. The existing runtime rejects invalid model selections;
+it never inserts missing model selections to create a success. The original scorer requires exact
+tool/argument dispatch, all four canonical recommendation codes in order, valid grounded evidence
+and provenance within scope, zero writes/attempts, and a complete security audit. Deterministic
+operational computations remain in the server's existing recommendation pipeline.
+
 The future real-transport path requires all of: explicit `--live`, a process-only nonsecret opt-in
 marker `AGENT_LIVE_SMOKE_OPT_IN=approved-synthetic-smoke-v1`, interactive input/output, exact confirmation
 `RUN gpt-6-luna SYNTHETIC DISCOVERY ONLY MAX 2 REQUESTS`, enabled validated settings for the fixed
@@ -729,7 +755,21 @@ or arbitrary scenario IDs. These gates prevent accidental activation; they do no
 approval. **This milestone does not authorize live execution or credential provisioning.**
 The prompt explicitly names `authorized-discovery`, its two-request ceiling, and no assessment.
 Separate human approval must precede any future use of that live option; confirming discovery cannot
-approve a three-scenario run.
+approve assessment or a three-scenario run.
+
+Assessment uses a separate process-only marker,
+`AGENT_LIVE_ASSESSMENT_OPT_IN=approved-synthetic-assessment-v1`, explicit assessment mode plus `--live`,
+and exact TTY confirmation `RUN gpt-6-luna SYNTHETIC ASSESSMENT selected-all-signals MAX 2 REQUESTS`.
+`AssessmentConsent` carries a fixed assessment mode, strict boolean opt-in, exact confirmation,
+confirming process ID, and finite monotonic confirmation time. It expires after 60 seconds before
+execution and rejects future timestamps or another process ID. Discovery consent/marker cannot
+satisfy assessment; assessment consent cannot authorize discovery. Missing/invalid/stale consent,
+automation markers/imported pytest, and noninteractive stdin/stdout all fail before API key access,
+client construction, or database creation. Timestamps/TTL/process identity are never CLI/environment
+options. The assessment prompt names the selected synthetic scenario/queue, two-request ceiling,
+single read-only tool, no automatic retries/repair, and possible API charges after separate approval.
+These local safeguards do not constitute approval. **Sprint 4E-2D authorizes preparation and mocked
+verification only; future live assessment requires separate human approval.**
 
 Trusted tests may inject an official SDK client factory only through Python. Before any SDK request,
 that seam requires an `httpx.Client` whose default and mounted transports are `httpx.MockTransport`;
@@ -739,20 +779,20 @@ usage capture, runtime/tool/scorer calls, and resource cleanup. No raw reasoning
 Trusted Python can select `mocked-suite` with a nine-request ceiling to retain all three Sprint 4E-2A
 scenarios (`authorized-discovery`, `selected-all-signals`, `named-assessment`). This mode requires the
 verified mocked factory; with no factory it is blocked before credentials or fixtures, even outside
-CI/pytest. No CLI flag exposes that mode or arbitrary scenarios. Both modes use the same runner/scorer.
+CI/pytest. No CLI flag exposes that mode or arbitrary scenarios. All modes use the same runner/scorer.
 
 `provider_budget.ProviderRequestBudget` is an invocation-local, shared, atomic ceiling of at most two
-SDK requests for discovery; trusted code may lower it, never raise it in discovery mode. It is passed
+SDK requests for either single-scenario mode; trusted code may lower it, never raise it in those modes. It is passed
 through each Responses adapter's private run scope without resetting the counter. Reservation occurs immediately before
 `responses.create`, so authentication/rate-limit/network failures consume requests; missing credentials,
 expired deadlines before dispatch, and exhausted budgets do not create invented requests. The
-discovery adapter ceiling and runtime model-turn limit are both two; its tool-request limit is one.
+single-scenario adapter ceiling and runtime model-turn limit are both two; the tool-request limit is one.
 The mocked suite retains the prior nine global requests / three per scenario / two serial tools. The
 runner stops on the first failed scenario, observed security violation, or exhausted global budget,
 without reruns, repair loops, retries, or recovery. Reaching a budget between scenarios leaves the
 remaining scenarios explicitly unexecuted; it never reports them as successes.
 
-Discovery output is capped at 2,048 tokens per request (including reasoning), with a two-request output
+Single-scenario output is capped at 2,048 tokens per request (including reasoning), with a two-request output
 ceiling of 4,096. Input-token usage remains unknown until actual usage fields arrive; payload bytes
 are not a token/currency budget. The general runtime's ten-second default is unchanged. Smoke scenarios
 retain a scoped 30-second deadline for the serial calls, selectable only as
@@ -761,16 +801,18 @@ remaining scenario time. Existing size limits remain: 196,608 bytes for provider
 response, 8,192 for model turns, 4,096 for question/arguments, 65,536 for tool results. These are local
 cooperative controls, not hard process/provider cancellation or guaranteed provider billing caps.
 Request limits do not bound input tokens in token units or establish final billed usage; missing usage
-and prices remain unknown. There has been no measurement of actual live-model behavior or API cost.
+and prices remain unknown. This preparation measures no live assessment behavior or API cost;
+the PR #11 case study separately preserves the operator-reported discovery observation.
 
 Responses settings retain `store=False`, `parallel_tool_calls=False`, strict schemas, no hosted tools,
 and zero SDK retries. The fixed official endpoint still ignores `OPENAI_BASE_URL`. The proposed model
-is configured in trusted code only; no live account access/compatibility or latency was verified.
+is configured in trusted code only; no live assessment account access/compatibility or latency was verified.
 Official [model](https://developers.openai.com/api/docs/models/gpt-6-luna) and
 [function-calling](https://developers.openai.com/api/docs/guides/function-calling) references document
 the intended API surface; this milestone does not add price assumptions or query billing.
 
-Reports identify execution mode, global request ceiling, planned scenario/scope/discovery order,
+Reports identify execution mode, global request ceiling, planned scenario/scope/selection, expected
+tool sequences and discovery/recommendation order,
 terminal outcome, and retain existing sanitized evaluation principles, with workflow/model, model/tool request/
 dispatch/rejection counts, actual provider requests, returned outcome and exact tool/argument checks,
 grounding/provenance/recommendation checks, security violations, operational writes/attempts, per-case
@@ -789,8 +831,10 @@ Dry-run prints only its plan. Future execution writes JSON/Markdown beneath igno
 `evaluation-results/live-smoke/` by default. CLI exit 0 means dry-run or all execution gates passed;
 1 means blocked/failed execution, and 2 means invalid options/report-write failure. Option errors do
 not echo user values. The 26-scenario offline evaluator remains independent and retains its contracts.
-No successful live experiment, language understanding, real provider latency/cost, zero-hallucination
-claim, production reliability, or natural-language routing is established by this preparation.
+This preparation establishes no live assessment results, language understanding, real provider
+latency/cost, zero-hallucination claim, production reliability, or natural-language routing.
+The [assessment runbook](CONTROLLED_ASSESSMENT_RUNBOOK.md) distinguishes this unexecuted preparation
+from PR #11's completed operator-reported discovery case study and future approval requirements.
 
 ## Future work (not implemented)
 
