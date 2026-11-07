@@ -23,15 +23,23 @@ from ai_operations_agent.tool_schemas import StrictValue
 
 SCENARIO_IDS = ("authorized-discovery", "selected-all-signals", "named-assessment")
 DISCOVERY_SCENARIO_IDS = ("authorized-discovery",)
+ASSESSMENT_SCENARIO_IDS = ("selected-all-signals",)
 DISCOVERY_MAX_REQUESTS = 2
+ASSESSMENT_MAX_REQUESTS = 2
 MODEL_ID = "gpt-6-luna"
 OPT_IN_VARIABLE = "AGENT_LIVE_SMOKE_OPT_IN"
 OPT_IN_VALUE = "approved-synthetic-smoke-v1"
 CONFIRMATION = "RUN gpt-6-luna SYNTHETIC DISCOVERY ONLY MAX 2 REQUESTS"
+ASSESSMENT_OPT_IN_VARIABLE = "AGENT_LIVE_ASSESSMENT_OPT_IN"
+ASSESSMENT_OPT_IN_VALUE = "approved-synthetic-assessment-v1"
+ASSESSMENT_CONFIRMATION = (
+    "RUN gpt-6-luna SYNTHETIC ASSESSMENT selected-all-signals MAX 2 REQUESTS"
+)
+ASSESSMENT_CONSENT_TTL_SECONDS = 60
 
 
 class SmokeSettings(StrictValue):
-    execution_mode: Literal["discovery-only", "mocked-suite"] = "discovery-only"
+    execution_mode: Literal["discovery-only", "assessment-only", "mocked-suite"] = "discovery-only"
     provider_enabled: bool = False
     model_id: Literal["gpt-6-luna"] = MODEL_ID
     # Scoped to this smoke runner; general runtime and offline CLI defaults stay at 10s.
@@ -48,22 +56,26 @@ class SmokeSettings(StrictValue):
         return value
 
     @model_validator(mode="after")
-    def discovery_budget(self):
-        if self.execution_mode == "discovery-only" and self.max_provider_requests > DISCOVERY_MAX_REQUESTS:
-            raise ValueError("discovery permits at most two provider requests")
+    def single_scenario_budget(self):
+        ceiling = (ASSESSMENT_MAX_REQUESTS if self.execution_mode == "assessment-only"
+                   else DISCOVERY_MAX_REQUESTS)
+        if self.execution_mode != "mocked-suite" and self.max_provider_requests > ceiling:
+            raise ValueError("single-scenario smoke permits at most two provider requests")
         return self
 
     @property
     def scenario_ids(self):
-        return DISCOVERY_SCENARIO_IDS if self.execution_mode == "discovery-only" else SCENARIO_IDS
+        return {"discovery-only": DISCOVERY_SCENARIO_IDS,
+                "assessment-only": ASSESSMENT_SCENARIO_IDS,
+                "mocked-suite": SCENARIO_IDS}[self.execution_mode]
 
     @property
     def max_model_turns(self):
-        return 2 if self.execution_mode == "discovery-only" else 3
+        return 3 if self.execution_mode == "mocked-suite" else 2
 
     @property
     def max_tool_requests(self):
-        return 1 if self.execution_mode == "discovery-only" else 2
+        return 2 if self.execution_mode == "mocked-suite" else 1
 
 
 class SmokeConsent(StrictValue):
@@ -76,6 +88,27 @@ class SmokeConsent(StrictValue):
         if type(value) is not bool:
             raise ValueError("explicit boolean consent required")
         return value
+
+
+class AssessmentConsent(SmokeConsent):
+    """Fresh process-bound consent, constructed by the CLI or trusted mocked tests.
+
+    Timestamps and process identity cannot be supplied through CLI options/environment.
+    Discovery consent cannot satisfy this schema or its freshness checks.
+    """
+
+    execution_mode: Literal["assessment-only"] = "assessment-only"
+    confirmation: Literal[
+        "RUN gpt-6-luna SYNTHETIC ASSESSMENT selected-all-signals MAX 2 REQUESTS"
+    ]
+    confirmed_at: float = Field(default_factory=monotonic, ge=0, allow_inf_nan=False)
+    process_id: Annotated[int, Field(gt=0)] = Field(default_factory=os.getpid)
+
+
+def _opt_in(execution_mode):
+    if execution_mode == "assessment-only":
+        return ASSESSMENT_OPT_IN_VARIABLE, ASSESSMENT_OPT_IN_VALUE
+    return OPT_IN_VARIABLE, OPT_IN_VALUE
 
 
 def smoke_scenarios(settings: SmokeSettings | None = None):
@@ -95,6 +128,8 @@ def _planned_scenarios(scenarios):
              "expected_status": s.expected.status,
              "expected_recommendation_codes": list(s.expected.recommendation_codes)
              if s.expected.recommendation_codes is not None else None,
+             "expected_tool_sequences": [[call.model_dump() for call in seq]
+                                         for seq in s.expected.allowed_tool_sequences],
              "expected_discovery_queue_keys": list(s.authorized_queue_scope)
              if s.request.workflow == "discovery" else None,
              "expected_discovery_order": "queue-id-ascending"
@@ -106,6 +141,7 @@ def execution_plan(settings: SmokeSettings | None = None) -> dict:
     settings = settings or SmokeSettings()
     settings = SmokeSettings.model_validate_json(settings.model_dump_json(), strict=True)
     dataset, scenarios = smoke_scenarios(settings)
+    opt_in_variable, opt_in_value = _opt_in(settings.execution_mode)
     return {
         "schema_version": "live-smoke-plan-v1", "mode": "offline-dry-run",
         "execution_mode": settings.execution_mode, "scenario_count": len(scenarios),
@@ -130,12 +166,16 @@ def execution_plan(settings: SmokeSettings | None = None) -> dict:
         "max_response_bytes": 196608,
         "store": False, "parallel_tool_calls": False, "sdk_retries": 0,
         "hosted_tools": False, "read_only": True, "advisory_only": True,
-        "provider_requests_executed": 0, "usage": TokenUsage().model_dump(),
+        "provider_requests_executed": 0, "credential_reads": 0,
+        "provider_clients_created": 0, "databases_created": 0,
+        "usage": TokenUsage().model_dump(),
         "estimated_cost_usd": None,
         "required_live_gates": ["separate human approval", "explicit --live",
-                                f"process {OPT_IN_VARIABLE}={OPT_IN_VALUE}",
+                                f"process {opt_in_variable}={opt_in_value}",
                                 "interactive TTY confirmation", "not pytest or CI",
                                 "enabled trusted model configuration", "process API credential"],
+        "assessment_consent_ttl_seconds": ASSESSMENT_CONSENT_TTL_SECONDS
+        if settings.execution_mode == "assessment-only" else None,
         "limitations": ["Offline plan only; this invocation measures no live behavior, latency, or API cost.",
                         "Token ceilings include reasoning output; input tokens and cost are unknown.",
                         "Local budgets are not guaranteed provider billing caps.",
@@ -159,15 +199,22 @@ def _precondition(settings, consent, client_factory):
     if settings.execution_mode == "mocked-suite" and client_factory is None:
         return "mocked_suite_requires_mock_transport"
     try:
-        SmokeConsent.model_validate_json(consent.model_dump_json(), strict=True)
+        consent_type = AssessmentConsent if settings.execution_mode == "assessment-only" else SmokeConsent
+        validated_consent = consent_type.model_validate_json(consent.model_dump_json(), strict=True)
     except (AttributeError, ValidationError, ValueError, TypeError):
         return "missing_explicit_consent"
+    if settings.execution_mode == "assessment-only":
+        age = monotonic() - validated_consent.confirmed_at
+        if (validated_consent.process_id != os.getpid()
+                or not 0 <= age <= ASSESSMENT_CONSENT_TTL_SECONDS):
+            return "expired_or_mismatched_assessment_consent"
     # The injected factory is a trusted testing seam, never a CLI option. Normal pytest/CI
     # cannot reach the actual SDK factory, even with --live, opt-in, and a credential present.
     if client_factory is None:
         if _automation_context():
             return "automated_live_execution_blocked"
-        if os.environ.get(OPT_IN_VARIABLE) != OPT_IN_VALUE:
+        opt_in_variable, opt_in_value = _opt_in(settings.execution_mode)
+        if os.environ.get(opt_in_variable) != opt_in_value:
             return "missing_explicit_consent"
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             return "interactive_confirmation_required"
@@ -250,7 +297,7 @@ def _turn_counts(events):
     )}
 
 
-def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
+def run_smoke(settings: SmokeSettings, consent: SmokeConsent | AssessmentConsent | None = None, *,
               client_factory=None, clock=monotonic, prices: VerifiedPriceTable | None = None) -> dict:
     """Trusted Python seam. The CLI alone obtains interactive local consent.
 
@@ -305,7 +352,9 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
                 attempt = {"scenario_id": scenario.id, "workflow": scenario.request.workflow}
                 attempts.append(attempt)
                 adapter = OpenAIResponsesAdapter(provider, client_factory=factory,
-                                                 clock=clock, trace=trace, request_budget=budget)
+                                                 clock=clock, trace=trace, request_budget=budget,
+                                                 selected_queue_id=evaluation.build_access(
+                                                     scenario, fixtures).selected_queue_id)
                 scenario_start = perf_counter()
                 try:
                     result = evaluation.evaluate_scenario(
@@ -355,9 +404,12 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | None = None, *,
         for r in report["results"] for violation in r["security_violations"]
     ]
     report["security_audit_complete"] = (not report["unscored_attempts"]
-                                          and report["stop_reason"] != "smoke_execution_failed")
+                                          and report["stop_reason"] != "smoke_execution_failed"
+                                          and not any("incomplete_tool_telemetry" in r["security_violations"]
+                                                      for r in report["results"]))
     _not_run(report, scenarios, report["stop_reason"] or "not_executed")
     report["required_gates_passed"] = (len(report["results"]) == len(scenarios)
+                                       and report["security_audit_complete"]
                                        and all(r["passed"] for r in report["results"])
                                        and report["stop_reason"] is None)
     report["terminal_outcome"] = ("incomplete_audit" if not report["security_audit_complete"] else
@@ -394,10 +446,20 @@ def report_markdown(report):
             lines += ["", f"Expected discovery ({planned['scenario_id']}): "
                       f"{', '.join(planned['expected_discovery_queue_keys'])}; "
                       f"order: {planned['expected_discovery_order']}."]
+        if planned["expected_recommendation_codes"] is not None:
+            lines += ["", f"Expected assessment ({planned['scenario_id']}): selected synthetic "
+                      f"{planned['selected_queue']}; recommendations in canonical order: "
+                      f"{', '.join(planned['expected_recommendation_codes'])}."]
     for result in report["results"]:
         lines += [f"{result['scenario_id']}: exact discovery: "
                   f"{result['checks']['discovery_membership_order']}; "
                   f"grounding / provenance / authorized scope: {result['checks']['evidence_grounding']}."]
+        lines += [f"{result['scenario_id']}: correct tool: {result['checks']['tool_selection']}; "
+                  f"exact arguments: {result['checks']['exact_arguments']}; "
+                  f"recommendation membership / order: "
+                  f"{result['checks']['recommendation_membership_order']}; "
+                  f"operational writes / attempts: {result['operational_writes']} / "
+                  f"{result['operational_write_attempts']}."]
     lines += ["", "Recorded security violations: " + (", ".join(
         f"{r['scenario_id']}: {r['violation']}" for r in report["security_violations"]
     ) or "none"), f"Executed-scenario security audit complete: {report['security_audit_complete']}.", ""]
@@ -411,38 +473,53 @@ class _Parser(argparse.ArgumentParser):
         self.exit(2, "invalid smoke evaluation options\n")
 
 
-def _cli_consent():
+def _cli_consent(execution_mode="discovery-only"):
     if _automation_context():
         return None, "automated_live_execution_blocked"
-    if os.environ.get(OPT_IN_VARIABLE) != OPT_IN_VALUE:
+    opt_in_variable, opt_in_value = _opt_in(execution_mode)
+    if os.environ.get(opt_in_variable) != opt_in_value:
         return None, "missing_explicit_consent"
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None, "interactive_confirmation_required"
     try:
-        answer = input("Separate live approval required. Discovery only: authorized-discovery; "
-                       f"at most two provider requests, no assessment. Type {CONFIRMATION}: ")
+        if execution_mode == "assessment-only":
+            confirmation = ASSESSMENT_CONFIRMATION
+            prompt = ("Separate live assessment approval required. Synthetic assessment only: "
+                      "selected-all-signals, dataset-selected all queue; at most two provider "
+                      "requests, one read-only get_queue_recommendations dispatch, no automatic "
+                      "retries or repair. A separately approved real run may incur API charges. "
+                      f"Type {confirmation}: ")
+        else:
+            confirmation = CONFIRMATION
+            prompt = ("Separate live approval required. Discovery only: authorized-discovery; "
+                      f"at most two provider requests, no assessment. Type {CONFIRMATION}: ")
+        answer = input(prompt)
     except (EOFError, KeyboardInterrupt):
         return None, "missing_explicit_consent"
-    if answer != CONFIRMATION:
+    if answer != confirmation:
         return None, "missing_explicit_consent"
-    return SmokeConsent(opted_in=True, confirmation=answer), None
+    consent_type = AssessmentConsent if execution_mode == "assessment-only" else SmokeConsent
+    return consent_type(opted_in=True, confirmation=answer), None
 
 
 def main(argv=None):
     parser = _Parser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--live", action="store_true",
-                      help="Discovery only, at most 2 requests; requires separate approval and consent")
+                      help="Selected mode, at most 2 requests; requires separate approval and mode-specific consent")
     mode.add_argument("--dry-run", action="store_true", help="Offline plan (the default)")
+    parser.add_argument("--execution-mode", choices=("discovery-only", "assessment-only"),
+                        default="discovery-only", help="Fixed synthetic scenario; discovery is the default")
     parser.add_argument("--scenario-timeout-seconds", type=int, choices=(10, 20, 30), default=30)
     parser.add_argument("--output-dir", type=Path, default=Path("evaluation-results/live-smoke"))
     args = parser.parse_args(argv)
     settings = SmokeSettings(provider_enabled=args.live,
+                             execution_mode=args.execution_mode,
                              scenario_timeout_seconds=args.scenario_timeout_seconds)
     if not args.live:
         print(json.dumps(execution_plan(settings), indent=2, allow_nan=False))
         return 0
-    consent, reason = _cli_consent()
+    consent, reason = _cli_consent(settings.execution_mode)
     if reason:
         report = _initial_report(settings, mocked=False)
         report["stop_reason"] = reason

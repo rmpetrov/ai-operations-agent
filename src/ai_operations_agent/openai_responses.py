@@ -89,6 +89,8 @@ select every canonical recommendation code in that same order. Use blocks
 For unsupported workflow use kind "inability", inability "unsupported_capability", and empty
 references, recommendation_codes, and blocks. Otherwise inability is null. Return all seven
 schema fields. Supply no prose, counts, actions, severity, or evidence payloads.
+When trusted_selection is present, use its server-selected queue_id for the recommendation
+call. This context is supplied by trusted local code; it grants no additional permissions.
 """
 
 
@@ -121,12 +123,19 @@ class OpenAIResponsesAdapter:
         clock: Callable[[], float] = monotonic,
         trace: RuntimeTrace | None = None,
         request_budget: ProviderRequestBudget | None = None,
+        selected_queue_id: int | None = None,
     ):
         self.settings = settings or ResponsesSettings()
         self._factory = client_factory
         self._clock = clock
         self._trace = trace
         self._request_budget = request_budget
+        # A trusted caller may disclose its existing selection, never infer it from text
+        # or tool output. The runtime still independently authorizes every dispatch.
+        self._selected_queue_id = (
+            QueueRecommendationsArguments(queue_id=selected_queue_id).queue_id
+            if selected_queue_id is not None else None
+        )
         self._client = None
         self._history: list[dict] = []
         self._conversation: tuple[dict, ...] = ()
@@ -138,7 +147,8 @@ class OpenAIResponsesAdapter:
     @contextmanager
     def open_run(self) -> Iterator["OpenAIResponsesAdapter"]:
         run = OpenAIResponsesAdapter(self.settings, client_factory=self._factory, clock=self._clock,
-                                     trace=self._trace, request_budget=self._request_budget)
+                                     trace=self._trace, request_budget=self._request_budget,
+                                     selected_queue_id=self._selected_queue_id)
         try:
             yield run
         finally:
@@ -176,7 +186,12 @@ class OpenAIResponsesAdapter:
             if conversation[0]["role"] != "user":
                 raise ValueError("invalid initial role")
             request = AgentRequest.model_validate(conversation[0]["request"], strict=True)
-            return [{"role": "user", "content": _json(request.model_dump(mode="json"))}]
+            content = request.model_dump(mode="json")
+            if self._selected_queue_id is not None:
+                if request.workflow != "queue_assessment":
+                    raise ValueError("selected context requires assessment workflow")
+                content["trusted_selection"] = {"queue_id": self._selected_queue_id}
+            return [{"role": "user", "content": _json(content)}]
         if (self._pending is None or len(conversation) != len(self._conversation) + 2
                 or conversation[:-2] != self._conversation):
             raise ValueError("invalid continuation")
