@@ -26,6 +26,7 @@ from ai_operations_agent.agent_schemas import (
     ToolRequest,
 )
 from ai_operations_agent.agent_telemetry import RuntimeTrace
+from ai_operations_agent.answer_diagnostics import AnswerRejection, RejectionReason
 from ai_operations_agent.fake_model import ModelAdapter, RunScopedModelAdapter
 from ai_operations_agent.tool_schemas import (
     AccessContext,
@@ -95,16 +96,18 @@ def _render(draft, request, ledger, discovered, assessed, target):
         # Queue matching failures are decided from discovery by the server, never guessed.
         if (request.workflow != "unsupported" or draft.inability != "unsupported_capability"
                 or draft.references or draft.recommendation_codes or draft.blocks):
-            raise GroundingError("unsupported inability")
+            raise AnswerRejection(RejectionReason.INVALID_ANSWER_SELECTION)
         return _inability(ledger.run_id, ledger, draft.inability)
     if draft.inability is not None or len(set(draft.references)) != len(draft.references):
-        raise GroundingError("invalid answer selection")
+        raise AnswerRejection(RejectionReason.INVALID_ANSWER_SELECTION)
     if draft.kind == "discovery":
         if request.workflow != "discovery" or discovered is None or assessed is not None:
-            raise GroundingError("discovery not performed")
+            raise AnswerRejection(RejectionReason.INVALID_ANSWER_SELECTION)
         expected = ledger.references(discovered.source_id)
-        if draft.references != expected or draft.recommendation_codes or draft.blocks != ("discovery",):
-            raise GroundingError("invalid discovery selection")
+        if draft.references != expected or draft.recommendation_codes:
+            raise AnswerRejection(RejectionReason.INVALID_ANSWER_SELECTION)
+        if draft.blocks != ("discovery",):
+            raise AnswerRejection(RejectionReason.EXPLANATION_BLOCKS_MISMATCH)
         # Names and IDs are data interpolated by the server, never instructions.
         names = "; ".join(f"{q['name']} (queue {q['id']})" for q in discovered.snapshot)
         blocks = (ExplanationBlock(kind="discovery", text=(
@@ -113,11 +116,11 @@ def _render(draft, request, ledger, discovered, assessed, target):
         uncertainty = ("Only queues in the server-authorized scope are shown.",)
     else:
         if request.workflow != "queue_assessment" or assessed is None or target is None:
-            raise GroundingError("assessment not performed")
+            raise AnswerRejection(RejectionReason.INVALID_ANSWER_SELECTION)
         snapshot = assessed.snapshot
         canonical = snapshot["recommendations"]
         if draft.recommendation_codes != tuple(item["code"] for item in canonical):
-            raise GroundingError("recommendation membership or order")
+            raise AnswerRejection(RejectionReason.RECOMMENDATION_SELECTION_MISMATCH)
         refs = ledger.references(assessed.source_id)
         required = tuple(ref for ref in refs if ref.kind in {"assessment", "recommendation"})
         # A compact answer always cites its complete assessment and every recommendation.
@@ -125,10 +128,10 @@ def _render(draft, request, ledger, discovered, assessed, target):
         if draft.references[:len(required)] != required or any(
             ref not in refs or ref.kind != "metric" for ref in draft.references[len(required):]
         ):
-            raise GroundingError("unsupported assessment references")
+            raise AnswerRejection(RejectionReason.ASSESSMENT_REFERENCE_LAYOUT_MISMATCH)
         expected_blocks = ("queue_summary", "recommendations" if canonical else "no_rules")
         if draft.blocks != expected_blocks:
-            raise GroundingError("unsupported explanation blocks")
+            raise AnswerRejection(RejectionReason.EXPLANATION_BLOCKS_MISMATCH)
         assessment = snapshot["assessment"]
         metrics = assessment["metrics"]
         blocks = [ExplanationBlock(
@@ -150,8 +153,11 @@ def _render(draft, request, ledger, discovered, assessed, target):
         uncertainty = _LIMITATIONS
     evidence = tuple(ledger.resolve(ref, target if assessed is not None else None)
                      for ref in draft.references)
-    return AgentResponse(run_id=ledger.run_id, status="answered", sources=ledger.sources,
-                         evidence=evidence, explanation=blocks, uncertainty=uncertainty)
+    try:
+        return AgentResponse(run_id=ledger.run_id, status="answered", sources=ledger.sources,
+                             evidence=evidence, explanation=blocks, uncertainty=uncertainty)
+    except (GroundingError, ValidationError):
+        raise AnswerRejection(RejectionReason.RESPONSE_CONTRACT_VALIDATION_FAILURE) from None
 
 
 def run_agent(
@@ -192,7 +198,7 @@ def run_agent(
         if response.sources != ledger.sources or any(
             item != ledger.resolve(item.reference) for item in response.evidence
         ):
-            raise GroundingError("response provenance mismatch")
+            raise AnswerRejection(RejectionReason.RESPONSE_CONTRACT_VALIDATION_FAILURE)
         if len(response.model_dump_json().encode("utf-8")) > limits.max_response_bytes:
             # Oversize failure is atomic; no partial facts or truncated source snapshots.
             response = AgentResponse(run_id=run_id, status="error", error=SanitizedError(
@@ -280,9 +286,16 @@ def run_agent(
                 raise RuntimeFailure("deadline_exceeded" if turn.reason == "timeout"
                                      else "model_unavailable")
             if isinstance(turn, StructuredAnswerDraft):
-                response = _render(turn, request, ledger, discovered, assessed, target)
-                remaining()
-                return finish(response)
+                try:
+                    response = _render(turn, request, ledger, discovered, assessed, target)
+                    remaining()
+                    return finish(response)
+                except (AnswerRejection, RuntimeFailure):
+                    raise
+                except Exception:
+                    raise AnswerRejection(
+                        RejectionReason.INTERNAL_VALIDATION_RENDERING_FAILURE,
+                    ) from None
             # Validate the complete single call before dispatch; no batches, retries or repairs.
             if turn.name not in tools.SUPPORTED_TOOLS:
                 raise RuntimeFailure("unsupported_tool")
@@ -351,8 +364,15 @@ def run_agent(
     except RuntimeFailure as exc:
         reject_pending()
         return finish(failure(exc.code))
+    except AnswerRejection as exc:
+        reject_pending()
+        if trace is not None:
+            trace.rejection_reason = exc.reason
+        return finish(failure("invalid_answer"))
     except (GroundingError, ValidationError, TypeError, ValueError, RecursionError, UnicodeError):
         reject_pending()
+        if trace is not None:
+            trace.rejection_reason = RejectionReason.INTERNAL_VALIDATION_RENDERING_FAILURE
         return finish(failure("invalid_answer"))
     finally:
         model_scope.close()

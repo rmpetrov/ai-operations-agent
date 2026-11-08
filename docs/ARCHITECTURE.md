@@ -18,7 +18,10 @@ transport tests only. Live execution was not authorized by that milestone.
 Sprint 4E-2B restricted the first separately approved experiment to synthetic discovery only, with two provider requests
 and one read-only tool call; the original three-scenario suite remains mocked-only.
 Sprint 4E-2D prepares a separately gated single-scenario assessment through the same runner/scorer.
-This assessment preparation is offline/mocked only: no live assessment has executed or been approved.
+That assessment preparation was offline/mocked only and executed no live assessment. Sprint 4E-2E
+adds sanitized diagnostics following an operator-reported failed first live assessment; its rejected
+candidate was not retained, so the historical root cause remains unknown. This implementation grants
+no approval for further live execution.
 
 ## Context
 
@@ -835,6 +838,37 @@ This preparation establishes no live assessment results, language understanding,
 latency/cost, zero-hallucination claim, production reliability, or natural-language routing.
 The [assessment runbook](CONTROLLED_ASSESSMENT_RUNBOOK.md) distinguishes this unexecuted preparation
 from PR #11's completed operator-reported discovery case study and future approval requirements.
+
+## Sanitized failure diagnostics (Sprint 4E-2E)
+
+`answer_diagnostics.py` defines six fixed internal rejection labels, documented in the
+[README taxonomy](../README.md#sanitized-failure-diagnostics-sprint-4e-2e). Explicit `_render`
+selection/layout/block checks raise a typed rejection; response construction and private-ledger
+provenance have a separate contract label. Unexpected exceptions inside answer rendering fail closed
+with an internal-validation label. Existing general validation failures retain their public
+`invalid_answer` result and receive the same internal fallback. Exception contents are never mapped,
+logged or serialized. The enum lives only in trusted request-local `RuntimeTrace`; `AgentResponse`,
+the model-facing draft schema and adapter inputs remain unchanged. Report projection accepts only
+enum instances and emits their fixed values or null, including observed rejections on unscored
+attempts. Adapter protocol failures still use the existing public classification and no runtime label.
+The diagnostic describes the first failed boundary, not every possible defect or a root cause.
+
+Request accounting separates a reached ceiling from a prevented request. The atomic shared budget
+records early adapter denial as well as failed reservation immediately before the SDK call, without
+incrementing request counts. Merely using the final permitted request sets only the ceiling flag.
+Runner precedence is unchanged for security and incomplete audits: security violations stop first;
+scoring/cleanup exceptions fail execution and mark the audit incomplete. Otherwise an actual
+budget-prevented continuation yields `global_request_budget_exhausted`, and a completed unsuccessful
+scenario yields `scenario_gate_failed`, even at 2/2 requests. Success at 2/2 remains a success.
+A mocked-suite ceiling between scenarios keeps the existing stop reason and unexecuted entries,
+without claiming an SDK request was attempted/prevented. JSON and Markdown expose both budget flags.
+
+Official SDK tests use the existing verified MockTransport seam and private synthetic SQLite.
+They exercise all labels, actual supplied-reference order, optional metrics, exact-budget completion,
+early/racing budget denial, unchanged public failures, audit/cleanup precedence and sanitization.
+No prompts, reference ordering, scorer expectations, grounding checks, limits or consent gates change.
+No live call is made. The operator-reported first failed assessment is not retrospectively classified;
+its raw candidate is unavailable and `evaluation-results/live-assessment-first/` is not modified.
 
 ## Future work (not implemented)
 
