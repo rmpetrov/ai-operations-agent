@@ -35,6 +35,14 @@ class ProviderRequestBudget:
         with self._lock:
             return self._blocked
 
+    def prevent_if_exhausted(self) -> bool:
+        """Record an attempted continuation prevented before SDK/client preparation."""
+        with self._lock:
+            if self._used >= self._limit:
+                self._blocked = True
+                return True
+            return False
+
     def reserve(self) -> bool:
         with self._lock:
             if self._used >= self._limit:

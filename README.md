@@ -765,7 +765,50 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_assessment_liv
 The scripts and mocked results do not measure live assessment accuracy, natural-language routing,
 real provider latency, API cost, or production reliability. The separate discovery case study records
 one operator-reported live observation and unverified billing. A small smoke set cannot establish
-zero hallucinations or reliability. Assessment remains unexecuted against a live provider.
+zero hallucinations or reliability. Sprint 4E-2D preparation itself executed no live assessment.
+
+### Sanitized failure diagnostics (Sprint 4E-2E)
+
+The operator reported a subsequent first `selected-all-signals` live assessment returning
+`invalid_answer` after two requests, two model turns and one authorized recommendation dispatch,
+with no observed security violations and a complete audit. The rejected candidate was not retained;
+its historical root cause remains unknown. Offline reproductions, including reference-order failures,
+do not retrospectively classify that observation. `evaluation-results/live-assessment-first/` is untouched.
+
+New JSON/Markdown reports add a nullable `rejection_reason` from a closed internal taxonomy:
+
+| Code | Observed validation boundary |
+| --- | --- |
+| `invalid_answer_selection` | Answer kind/workflow, inability, duplicate references, or discovery selection |
+| `recommendation_selection_mismatch` | Missing, extra, or reordered recommendation codes |
+| `assessment_reference_layout_mismatch` | Mandatory assessment/recommendation prefix or optional metric references |
+| `explanation_blocks_mismatch` | Explanation block selection/order |
+| `response_contract_validation_failure` | Rendered response contract or private-ledger provenance check |
+| `internal_validation_rendering_failure` | Unclassified internal validation/rendering exception |
+
+The runtime assigns these labels at explicit boundaries in request-local metadata. Reports accept only
+the internal enum; exception text never selects a label. Public responses retain `invalid_answer` and
+their existing schema. Adapter protocol/schema failures retain `model_unavailable` and a null runtime
+rejection reason. Scoring failures can retain an already observed label in an unscored attempt without
+claiming a complete audit. Only the first encountered boundary is reported; a label is not a root-cause
+analysis. No candidates, identifiers, pointers, operational facts, transcripts, or reasoning are added.
+
+`request_budget_ceiling_reached` records consumption of the permitted requests.
+`provider_request_prevented` records an actual adapter continuation denied by the shared budget,
+including early rejection before credential reads/client construction. A completed `invalid_answer`
+at 2/2 is `scenario_gate_failed`, with the ceiling reached and no prevented request. Success at 2/2
+remains successful. A prevented request remains `global_request_budget_exhausted`. In the mocked
+suite, reaching the ceiling between scenarios also stops with `global_request_budget_exhausted` and
+explicit `not_run` entries, but does not invent a prevented SDK request. Security violations retain
+priority; scoring/cleanup failures still mark the audit incomplete and fail the overall gates.
+
+This sprint changes diagnostics only. Prompts, supplied reference order, scorer/grounding expectations,
+budgets, consent gates, and read-only behavior are unchanged. No live requests, output repair, retries,
+credentials, billing changes, or further live evaluation are authorized by this implementation.
+
+```bash
+env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_failure_diagnostics.py
+```
 
 ## Tests and quality checks
 

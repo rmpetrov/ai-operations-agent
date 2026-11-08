@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import Field, ValidationError, field_validator, model_validator
 
 from ai_operations_agent.agent_telemetry import RuntimeTrace, TokenUsage, total_usage
+from ai_operations_agent.answer_diagnostics import sanitized_rejection_reason
 from ai_operations_agent.evaluation_costs import VerifiedPriceTable, estimate_cost
 from ai_operations_agent.evaluation_dataset import load_dataset
 from ai_operations_agent.provider_budget import MAX_SMOKE_REQUESTS, ProviderRequestBudget
@@ -246,6 +247,7 @@ def _initial_report(settings, *, mocked):
         "tool_rejection_count": 0,
         "usage": TokenUsage().model_dump(), "cost": estimate_cost(TokenUsage(), MODEL_ID),
         "elapsed_seconds": 0.0, "stop_reason": None, "terminal_outcome": "not_attempted",
+        "request_budget_ceiling_reached": False, "provider_request_prevented": False,
         "limits": safe_limits.model_dump(),
         "limitations": ["Synthetic smoke set only; no natural-language workflow routing.",
                         f"Scope is limited to {len(scenarios)} planned synthetic "
@@ -260,6 +262,8 @@ def _initial_report(settings, *, mocked):
                         "Missing usage/pricing is unknown. Cost estimates require verified pricing; "
                         "estimates are not actual billed cost or provider billing caps.",
                         "Adapter protocol rejections appear as model_unavailable; raw candidates are not runtime requests.",
+                        "Rejection reasons identify only observed validation boundaries in this invocation; "
+                        "historical failures without retained candidates remain unclassified.",
                         "Cooperative deadlines do not guarantee process cancellation or provider-side cancellation."],
     }
 
@@ -368,7 +372,7 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | AssessmentConsent
                 if result["security_violations"]:
                     report["stop_reason"] = "security_violation"
                     break
-                if budget.blocked or budget.exhausted and not result["passed"]:
+                if budget.blocked:
                     report["stop_reason"] = "global_request_budget_exhausted"
                     break
                 if not result["passed"]:
@@ -384,6 +388,8 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | AssessmentConsent
         # exception text, operational snapshots, SDK objects, or encrypted reasoning.
         report["stop_reason"] = "smoke_execution_failed"
     report["provider_request_count"] = budget.used
+    report["request_budget_ceiling_reached"] = budget.exhausted
+    report["provider_request_prevented"] = budget.blocked
     report.update(_turn_counts([event for trace in traces for event in trace.events]))
     usage = total_usage([value for trace in traces for value in trace.provider_usage])
     report["usage"] = usage.model_dump()
@@ -392,6 +398,7 @@ def run_smoke(settings: SmokeSettings, consent: SmokeConsent | AssessmentConsent
     scored = {result["scenario_id"] for result in report["results"]}
     report["unscored_attempts"] = [
         {**attempt, "status": "execution_or_scoring_failed",
+         "rejection_reason": sanitized_rejection_reason(trace.rejection_reason),
          "provider_request_count": len(trace.provider_usage),
          **_turn_counts(trace.events),
          "events": [e.model_dump(exclude_none=True) for e in trace.events]}
@@ -426,6 +433,8 @@ def report_markdown(report):
              f"terminal outcome: {report['terminal_outcome']}.",
              f"Required gates: {'PASS' if report['required_gates_passed'] else 'FAIL'}; "
              f"stop reason: {report['stop_reason'] or 'none'}.",
+             f"Request budget ceiling reached: {report.get('request_budget_ceiling_reached', False)}; "
+             f"provider request prevented: {report.get('provider_request_prevented', False)}.",
              f"Planned: {report['scenario_count']}; executed: {report['executed_scenario_count']}; "
              f"passed: {report['passed']}; failed: {report['failed']}; "
              f"unscored: {len(report['unscored_attempts'])}; not run: {len(report['not_run'])}.",
@@ -435,11 +444,15 @@ def report_markdown(report):
              f"Tool requests: {report['tool_request_count']}; dispatches: {report['tool_dispatch_count']}; "
              f"rejections: {report['tool_rejection_count']}.",
              f"Elapsed seconds: {report['elapsed_seconds']:.6f}.", "",
-             "| Scenario | Workflow | Status | Gate |", "| --- | --- | --- | --- |"]
-    lines += [f"| {r['scenario_id']} | {r['workflow']} | {r['status']} | {'PASS' if r['passed'] else 'FAIL'} |"
+             "| Scenario | Workflow | Status | Gate | Rejection reason |",
+             "| --- | --- | --- | --- | --- |"]
+    lines += [f"| {r['scenario_id']} | {r['workflow']} | {r['status']} | "
+              f"{'PASS' if r['passed'] else 'FAIL'} | {r.get('rejection_reason') or 'none'} |"
               for r in report["results"]]
-    lines += [f"| {r['scenario_id']} | {r['workflow']} | not run | unexecuted |" for r in report["not_run"]]
-    lines += [f"| {r['scenario_id']} | {r['workflow']} | {r['status']} | FAIL |"
+    lines += [f"| {r['scenario_id']} | {r['workflow']} | not run | unexecuted | none |"
+              for r in report["not_run"]]
+    lines += [f"| {r['scenario_id']} | {r['workflow']} | {r['status']} | "
+              f"FAIL | {r.get('rejection_reason') or 'none'} |"
               for r in report["unscored_attempts"]]
     for planned in report["planned_scenarios"]:
         if planned["expected_discovery_queue_keys"] is not None:

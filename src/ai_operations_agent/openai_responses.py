@@ -275,9 +275,11 @@ class OpenAIResponsesAdapter:
         return StructuredAnswerDraft.model_validate_json(_json(payload), strict=True)
 
     def next_turn(self, conversation, permitted_tools, response_schema, deadline) -> ModelTurn:
-        if self._closed or not self.settings.enabled or self._requests >= self.settings.max_requests:
+        if self._closed or not self.settings.enabled:
             return self._terminal(ModelFailure(reason="unavailable"))
-        if self._request_budget is not None and self._request_budget.exhausted:
+        if self._request_budget is not None and self._request_budget.prevent_if_exhausted():
+            return self._terminal(ModelFailure(reason="unavailable"))
+        if self._requests >= self.settings.max_requests:
             return self._terminal(ModelFailure(reason="unavailable"))
         try:
             timeout = self._remaining(deadline)

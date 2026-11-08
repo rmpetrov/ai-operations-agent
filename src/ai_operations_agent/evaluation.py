@@ -22,6 +22,7 @@ from ai_operations_agent.agent_schemas import (
     ToolRequest,
 )
 from ai_operations_agent.agent_telemetry import RuntimeTrace, TokenUsage, fingerprint, total_usage
+from ai_operations_agent.answer_diagnostics import sanitized_rejection_reason
 from ai_operations_agent.demo_model import DeterministicDemoAdapter
 from ai_operations_agent.evaluation_costs import estimate_cost
 from ai_operations_agent.evaluation_dataset import ExpectedCall, load_dataset
@@ -259,6 +260,8 @@ def score_scenario(scenario, fixtures, response, trace, observations, elapsed, *
     return {
         "scenario_id": scenario.id, "category": scenario.category, "passed": passed,
         "status": status, "error_code": error, "checks": checks,
+        "rejection_reason": sanitized_rejection_reason(trace.rejection_reason)
+        if error == "invalid_answer" else None,
         "security_violations": security, "unauthorized_tool_executions": unauthorized,
         "operational_writes": observations["operational_writes"],
         "operational_write_attempts": observations["write_attempts"],
@@ -392,8 +395,10 @@ def markdown_summary(report):
               f"Provider requests: {report['provider_request_count']}. "
               f"Tokens: {report['usage']['total_tokens'] if report['usage']['total_tokens'] is not None else 'unknown'}. "
               f"Estimated USD: {report['cost']['estimated_usd'] or 'unknown'}.",
-              "", "| Scenario | Category | Status | Gate |", "| --- | --- | --- | --- |"]
-    lines += [f"| {r['scenario_id']} | {r['category']} | {r['status']} | {'PASS' if r['passed'] else 'FAIL'} |"
+              "", "| Scenario | Category | Status | Rejection reason | Gate |",
+              "| --- | --- | --- | --- | --- |"]
+    lines += [f"| {r['scenario_id']} | {r['category']} | {r['status']} | "
+              f"{r.get('rejection_reason') or 'none'} | {'PASS' if r['passed'] else 'FAIL'} |"
               for r in report["results"]]
     lines += ["", "Security violations: " + (", ".join(
         f"{s['scenario_id']}: {s['violation']}" for s in report["security_violations"]

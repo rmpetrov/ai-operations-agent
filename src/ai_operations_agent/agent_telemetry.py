@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from ai_operations_agent.answer_diagnostics import RejectionReason
 from ai_operations_agent.tool_schemas import StrictValue
 
 ToolLabel = Literal["list_queues", "get_queue_recommendations", "unsupported"]
@@ -49,6 +50,7 @@ class RuntimeTrace:
     events: list[RuntimeEvent] = field(default_factory=list)
     provider_usage: list[TokenUsage] = field(default_factory=list)
     final_status: str | None = None
+    rejection_reason: RejectionReason | None = None
 
     def event(self, stage, *, name=None, arguments=None, snapshot=None):
         label = name if name in {"list_queues", "get_queue_recommendations"} else "unsupported"
