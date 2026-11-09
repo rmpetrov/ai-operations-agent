@@ -4,7 +4,15 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4E-2D — controlled queue assessment preparation, verified offline and with mocked SDK transport only. Discovery remains the default, and each public execution mode selects one synthetic scenario with at most two provider requests. [PR #11's case study](docs/LIVE_DISCOVERY_CASE_STUDY.md) records one completed, operator-reported live discovery experiment; no live assessment has run. Further live calls and credential provisioning require separate approval. The offline evaluation harness and CLI remain available. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4E-2F — documentation of operator-reported synthetic live results: one discovery PASS and two assessments, one FAIL and one PASS. Sprint 4E-2E's sanitized diagnostics improvement is merged in PR #13; the first assessment's root cause remains unknown. No reliability or production-readiness conclusion is established. Discovery remains the default; each public execution mode selects one synthetic scenario with at most two provider requests. Future live calls and credential provisioning require separate approval. The offline evaluation harness and CLI remain available. Local development only; no authentication or public deployment.
+
+## Engineering case studies
+
+- [Two live synthetic queue assessments: FAIL, diagnostics, then PASS](docs/LIVE_ASSESSMENT_COMPARATIVE_CASE_STUDY.md) — compares tool selection, grounded answers, request accounting, and evidence limits. The diagnostics change improved failure reporting; it did not establish a fix for the unknown first-run cause.
+- [First live synthetic discovery: PASS](docs/LIVE_DISCOVERY_CASE_STUDY.md) — the earlier bounded, read-only discovery experiment, preserved as originally documented.
+
+These operator-reported observations are separate from offline and mocked verification.
+They establish neither production readiness nor reliability; actual billed cost remains unverified.
 
 ## Tech stack
 
@@ -677,7 +685,10 @@ missing, mismatched, expired, future-dated, or discovery-only consent fails befo
 client construction, or fixture creation. The prompt names the scenario, two-request ceiling,
 single read-only recommendation tool, absence of automatic retries, and possible API charges after
 separate approval. Pytest/CI/noninteractive execution remains blocked. No environment variable or
-question can select another queue or raise the ceiling. **No live assessment has run or is approved.**
+question can select another queue or raise the ceiling. **Sprint 4E-2D preparation itself executed
+no live assessment and granted no live approval.** The later operator-reported FAIL and PASS are
+documented in the [comparative case study](docs/LIVE_ASSESSMENT_COMPARATIVE_CASE_STUDY.md);
+future live assessment still requires separate approval.
 See the [assessment runbook](docs/CONTROLLED_ASSESSMENT_RUNBOOK.md) for the complete preparation contract.
 
 Sprint 4E-2A's three-scenario capability remains available **only with mocked transport**, through
@@ -708,12 +719,12 @@ gates do not grant the separate human approval required by this repository's gua
 After separate approval, the existing live option would apply these gates to discovery only; it
 cannot authorize assessment or continue to the three-scenario suite.
 
-The configured proposed model is [`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna).
+The fixed smoke-runner model is [`gpt-6-luna`](https://developers.openai.com/api/docs/models/gpt-6-luna).
 The existing Responses adapter retains `store=False`, `parallel_tool_calls=False`, strict extra-forbidden
 function/answer schemas, zero SDK retries, no hosted tools, and bounded stateless continuation.
 See official [function-calling documentation](https://developers.openai.com/api/docs/guides/function-calling).
-The discovery case study is the only operator-reported live evidence; assessment compatibility has
-been tested only with mocked transport in this preparation.
+The preparation milestone verified the adapter only with mocked transport. The discovery and
+comparative assessment case studies separately record the later operator-reported live evidence.
 
 | Limit | Single-scenario runner |
 | --- | --- |
@@ -763,9 +774,9 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_assessment_liv
 ```
 
 The scripts and mocked results do not measure live assessment accuracy, natural-language routing,
-real provider latency, API cost, or production reliability. The separate discovery case study records
-one operator-reported live observation and unverified billing. A small smoke set cannot establish
-zero hallucinations or reliability. Sprint 4E-2D preparation itself executed no live assessment.
+real provider latency, API cost, or production reliability. The separate case studies record one
+operator-reported live discovery and two live assessments, with unverified billing. A small smoke set
+cannot establish zero hallucinations or reliability. Sprint 4E-2D preparation itself executed no live assessment.
 
 ### Sanitized failure diagnostics (Sprint 4E-2E)
 
@@ -802,7 +813,7 @@ suite, reaching the ceiling between scenarios also stops with `global_request_bu
 explicit `not_run` entries, but does not invent a prevented SDK request. Security violations retain
 priority; scoring/cleanup failures still mark the audit incomplete and fail the overall gates.
 
-This sprint changes diagnostics only. Prompts, supplied reference order, scorer/grounding expectations,
+Merged PR #13 changed diagnostics only. Prompts, supplied reference order, scorer/grounding expectations,
 budgets, consent gates, and read-only behavior are unchanged. No live requests, output repair, retries,
 credentials, billing changes, or further live evaluation are authorized by this implementation.
 
