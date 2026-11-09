@@ -4,9 +4,12 @@
 
 Simulate three customer-support queues and provide a reliable, explainable source of
 operational facts. **No autonomous writes, automation, public deployment, or irreversible action.**
-Application/provider defaults remain offline. PR #11 records one completed, operator-reported
-[live synthetic discovery experiment](LIVE_DISCOVERY_CASE_STUDY.md); further live calls require
-separate approval, and actual billed cost remains unverified.
+Application/provider defaults remain offline. PR #11 records one operator-reported
+[live synthetic discovery PASS](LIVE_DISCOVERY_CASE_STUDY.md). The
+[comparative assessment case study](LIVE_ASSESSMENT_COMPARATIVE_CASE_STUDY.md) records two
+operator-reported live synthetic assessments: one FAIL and one PASS. Further live calls require
+separate approval; actual billed cost remains unverified, and no reliability or production-readiness
+conclusion is established.
 Sprint 4B adds an internal runtime driven only by trusted scripted fake-model outcomes.
 Sprint 4C adds an optional Responses transport verified with mocked provider responses only;
 further live model invocations remain unapproved.
@@ -20,8 +23,9 @@ and one read-only tool call; the original three-scenario suite remains mocked-on
 Sprint 4E-2D prepares a separately gated single-scenario assessment through the same runner/scorer.
 That assessment preparation was offline/mocked only and executed no live assessment. Sprint 4E-2E
 adds sanitized diagnostics following an operator-reported failed first live assessment; its rejected
-candidate was not retained, so the historical root cause remains unknown. This implementation grants
-no approval for further live execution.
+candidate was not retained, so the historical root cause remains unknown. PR #13 merged that diagnostic
+improvement; the later assessment PASS does not establish a fix. Sprint 4E-2F documents the comparison
+without changing implementation or granting approval for further live execution.
 
 ## Context
 
@@ -808,8 +812,10 @@ and prices remain unknown. This preparation measures no live assessment behavior
 the PR #11 case study separately preserves the operator-reported discovery observation.
 
 Responses settings retain `store=False`, `parallel_tool_calls=False`, strict schemas, no hosted tools,
-and zero SDK retries. The fixed official endpoint still ignores `OPENAI_BASE_URL`. The proposed model
-is configured in trusted code only; no live assessment account access/compatibility or latency was verified.
+and zero SDK retries. The fixed official endpoint still ignores `OPENAI_BASE_URL`. The fixed model
+is configured in trusted code only; the preparation milestone verified no live assessment account
+access/compatibility or latency. Later operator-reported live observations are documented separately
+in the comparative case study.
 Official [model](https://developers.openai.com/api/docs/models/gpt-6-luna) and
 [function-calling](https://developers.openai.com/api/docs/guides/function-calling) references document
 the intended API surface; this milestone does not add price assumptions or query billing.
@@ -838,6 +844,8 @@ This preparation establishes no live assessment results, language understanding,
 latency/cost, zero-hallucination claim, production reliability, or natural-language routing.
 The [assessment runbook](CONTROLLED_ASSESSMENT_RUNBOOK.md) distinguishes this unexecuted preparation
 from PR #11's completed operator-reported discovery case study and future approval requirements.
+Its opening no-live-assessment statement is historical to Sprint 4E-2D preparation; the comparative
+case study records the subsequent operator-reported assessment FAIL and PASS.
 
 ## Sanitized failure diagnostics (Sprint 4E-2E)
 
