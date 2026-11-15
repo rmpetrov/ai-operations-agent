@@ -27,6 +27,13 @@ candidate was not retained, so the historical root cause remains unknown. PR #13
 improvement; the later assessment PASS does not establish a fix. Sprint 4E-2F documents the comparison
 without changing implementation or granting approval for further live execution.
 
+Sprint 4E-2G's [repeatability study](LIVE_ASSESSMENT_REPEATABILITY_STUDY.md) adds offline analysis
+of three later operator-reported attempts. Across all five assessments: two PASS outcomes, two
+final-answer validation failures, and one provider/adapter failure with unknown root cause.
+The later rejection identifies `invalid_answer_selection`, without retaining the rejected draft.
+These observations do not establish production reliability or change any implementation boundary;
+further live execution requires separate human approval. Earlier sprint descriptions remain historical.
+
 ## Context
 
 - **Queue:** a support team's workstream with a target resolution time in minutes.
