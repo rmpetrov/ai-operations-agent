@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from ai_operations_agent.answer_composition import CompositionStrategy
 from ai_operations_agent.answer_diagnostics import RejectionReason
 from ai_operations_agent.tool_schemas import StrictValue
 
@@ -51,6 +52,8 @@ class RuntimeTrace:
     provider_usage: list[TokenUsage] = field(default_factory=list)
     final_status: str | None = None
     rejection_reason: RejectionReason | None = None
+    composition_strategy: CompositionStrategy = CompositionStrategy.MODEL_SELECTED
+    final_model_selection_exercised: bool = False
 
     def event(self, stage, *, name=None, arguments=None, snapshot=None):
         label = name if name in {"list_queues", "get_queue_recommendations"} else "unsupported"

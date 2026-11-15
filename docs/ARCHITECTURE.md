@@ -885,6 +885,62 @@ No prompts, reference ordering, scorer expectations, grounding checks, limits or
 No live call is made. The operator-reported first failed assessment is not retrospectively classified;
 its raw candidate is unavailable and `evaluation-results/live-assessment-first/` is not modified.
 
+## Offline server-owned final composition prototype (Sprint 4F-2A)
+
+`run_agent(..., composition_strategy=CompositionStrategy.SERVER_OWNED)` is a trusted
+Python-only opt-in. The default remains `MODEL_SELECTED`. The argument requires the enum
+itself; strings, question content, tool arguments, provider responses and environment values
+cannot select a strategy. There is no new HTTP/CLI option or public response field. The
+controlled live runner still invokes the legacy default, with unchanged consent and budgets.
+This sprint authorizes offline implementation and mocked verification only, not live use.
+
+The new path retains model-originated tool proposals and the existing dispatcher. After
+authorized discovery completes, or after the selected/resolved queue's assessment completes,
+`answer_composition.compose_answer` selects from the private `EvidenceLedger`. Discovery
+uses all canonical queue references in order, including the valid empty result. Assessment
+uses the full assessment and every recommendation reference in canonical order, codes from
+the captured snapshot, and the existing summary/recommendations-or-no-rules block labels.
+Optional metric references are omitted; their values remain in the full assessment. No
+facts, recommendation rules, SQL, source snapshots or explanation prose are generated again.
+
+Named assessment still performs stripped, Unicode-casefolded exact matching after discovery.
+A unique match continues to the authorized assessment tool; missing and ambiguous matches
+retain existing inability outcomes. Discovery alone cannot complete a named assessment.
+The helper composes evidence-backed discovery/assessment only. For trusted `unsupported`
+workflows, the runtime returns the existing canonical `unsupported_capability` inability
+after precondition validation, without opening an adapter or dispatching tools. Model refusals
+retain their existing outcome. Model-authored discovery/assessment drafts remain rejected,
+including drafts received after named discovery but before assessment. There is no fallback
+from a rejected model draft, retry, repair or alternative provider.
+
+The composed selection passes through the unchanged `_render`, `AgentResponse` contract,
+private-ledger equality checks and atomic response-size check. Deadlines, tool/model budgets,
+call/tool reuse restrictions, scope, read-only transactions, safety flags, limitations and
+sanitized errors remain enforced. Rendering/composition failures fail closed through the
+existing rejection taxonomy. The adapter's run scope closes even though its final model
+request is omitted. Successful discovery/selected/named paths require respectively 1/1/2
+provider requests in SDK MockTransport tests, versus the legacy 2/2/3; these counts do not
+measure live reliability, latency or cost and do not diagnose or fix historical failures.
+
+`RuntimeTrace` records the strategy and whether a model draft was submitted to the legacy
+renderer. Evaluation results add `composition_strategy` (`model_selected` or `server_owned`)
+and `final_model_selection` (`exercised` or `not_exercised`). These are descriptive metadata,
+not quality gates; `exercised` does not mean valid. Server composition reports final model
+selection as NOT EXERCISED, including in the offline Markdown projection when such results
+are present. Existing status, grounding/recommendation checks and diagnostic meanings remain
+unchanged. Those checks evaluate the returned response, not unrequested model behavior.
+Missing token usage and cost remain unknown. No transcripts or operational values are added.
+
+The original 26-scenario dataset, its CLI, and live runner remain legacy. The trusted
+`evaluate_scenario` seam permits explicit server composition for separately identified
+offline tests. It rejects attempts to run the original fabricated/incomplete/reordered-final
+draft or post-assessment duplicate-call scenarios with that strategy: their final-turn attacks
+would never be consumed. New tests in `test_server_composition.py` and
+`test_server_composition_transport.py` separately cover canonical parity, independent existing
+recommendation/tool expectations, precompletion attacks, validator/provenance tampering,
+deadlines/size/budgets, request counts and cleanup. Existing legacy tests remain unchanged.
+No historical reports or case studies are rewritten.
+
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.

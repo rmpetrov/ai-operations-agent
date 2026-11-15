@@ -22,6 +22,7 @@ from ai_operations_agent.agent_schemas import (
     ToolRequest,
 )
 from ai_operations_agent.agent_telemetry import RuntimeTrace, TokenUsage, fingerprint, total_usage
+from ai_operations_agent.answer_composition import CompositionStrategy
 from ai_operations_agent.answer_diagnostics import sanitized_rejection_reason
 from ai_operations_agent.demo_model import DeterministicDemoAdapter
 from ai_operations_agent.evaluation_costs import estimate_cost
@@ -259,6 +260,9 @@ def score_scenario(scenario, fixtures, response, trace, observations, elapsed, *
     passed = all(value is not False for value in required) and not security
     return {
         "scenario_id": scenario.id, "category": scenario.category, "passed": passed,
+        "composition_strategy": trace.composition_strategy.value,
+        "final_model_selection": ("exercised" if trace.final_model_selection_exercised
+                                  else "not_exercised"),
         "status": status, "error_code": error, "checks": checks,
         "rejection_reason": sanitized_rejection_reason(trace.rejection_reason)
         if error == "invalid_answer" else None,
@@ -273,8 +277,20 @@ def score_scenario(scenario, fixtures, response, trace, observations, elapsed, *
     }
 
 
-def evaluate_scenario(scenario, fixtures, *, adapter=None, trace=None, limits=None, clock=None):
+def evaluate_scenario(
+    scenario, fixtures, *, adapter=None, trace=None, limits=None, clock=None,
+    composition_strategy: CompositionStrategy = CompositionStrategy.MODEL_SELECTED,
+):
     """Shared execution/scoring path; optional inputs are trusted local Python seams."""
+    if type(composition_strategy) is not CompositionStrategy:
+        raise ValueError("invalid composition strategy")
+    if composition_strategy is CompositionStrategy.SERVER_OWNED and scenario.behavior in {
+        "fabricated_evidence", "incomplete_recommendations", "reordered_recommendations",
+        "duplicate_request",
+    }:
+        # These legacy scenarios attack a final turn that server composition omits.
+        # Refuse to score an unconsumed attack as a successful defense.
+        raise ValueError("legacy final-turn attack is not exercised by server composition")
     trace = trace if trace is not None else RuntimeTrace()
     before = business_snapshot(fixtures.engine)
     response, unexpected = None, False
@@ -290,6 +306,7 @@ def evaluate_scenario(scenario, fixtures, *, adapter=None, trace=None, limits=No
                 engine=fixtures.engine, trace=trace,
                 new_id=(f"eval_{i}" for i in count()).__next__,
                 evaluation_context=EvaluationContext(EVALUATED_AT, RiskPolicy()),
+                composition_strategy=composition_strategy,
                 **runtime_options,
             )
         except Exception:
@@ -406,6 +423,13 @@ def markdown_summary(report):
               "Tool/argument metrics include deliberately invalid scripted requests; "
               "zero-request scenarios are excluded. Task completion counts normal cases only.", ""]
     lines += [f"- {limitation}" for limitation in report["limitations"]]
+    if any(r.get("composition_strategy") == CompositionStrategy.SERVER_OWNED.value
+           for r in report["results"]):
+        lines += ["", "| Scenario | Composition strategy | Final model selection |",
+                  "| --- | --- | --- |"]
+        lines += [f"| {r['scenario_id']} | {r['composition_strategy']} | "
+                  f"{r['final_model_selection'].replace('_', ' ').upper()} |"
+                  for r in report["results"]]
     return "\n".join(lines) + "\n"
 
 
