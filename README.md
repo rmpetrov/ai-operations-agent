@@ -4,10 +4,11 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4E-2F — documentation of operator-reported synthetic live results: one discovery PASS and two assessments, one FAIL and one PASS. Sprint 4E-2E's sanitized diagnostics improvement is merged in PR #13; the first assessment's root cause remains unknown. No reliability or production-readiness conclusion is established. Discovery remains the default; each public execution mode selects one synthetic scenario with at most two provider requests. Future live calls and credential provisioning require separate approval. The offline evaluation harness and CLI remain available. Local development only; no authentication or public deployment.
+> **Status:** Sprint 4E-2G — offline analysis of operator-reported synthetic live results: one discovery PASS and five queue assessments, with two PASS outcomes, two final-answer validation failures, and one provider/adapter failure with unknown root cause. Production reliability is not demonstrated. Discovery remains the default; each public execution mode selects one synthetic scenario with at most two provider requests. Further live execution and credential provisioning require separate human approval. The offline evaluation harness and CLI remain available. Local development only; no authentication or public deployment.
 
 ## Engineering case studies
 
+- [Five live synthetic queue assessments: repeatability and failure analysis](docs/LIVE_ASSESSMENT_REPEATABILITY_STUDY.md) — separates accepted answers, final-answer rejections, and provider/adapter failure; audits sanitized evidence and reproduces validation boundaries offline.
 - [Two live synthetic queue assessments: FAIL, diagnostics, then PASS](docs/LIVE_ASSESSMENT_COMPARATIVE_CASE_STUDY.md) — compares tool selection, grounded answers, request accounting, and evidence limits. The diagnostics change improved failure reporting; it did not establish a fix for the unknown first-run cause.
 - [First live synthetic discovery: PASS](docs/LIVE_DISCOVERY_CASE_STUDY.md) — the earlier bounded, read-only discovery experiment, preserved as originally documented.
 
@@ -775,7 +776,7 @@ env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_assessment_liv
 
 The scripts and mocked results do not measure live assessment accuracy, natural-language routing,
 real provider latency, API cost, or production reliability. The separate case studies record one
-operator-reported live discovery and two live assessments, with unverified billing. A small smoke set
+operator-reported live discovery and five live assessments, with unverified billing. A small smoke set
 cannot establish zero hallucinations or reliability. Sprint 4E-2D preparation itself executed no live assessment.
 
 ### Sanitized failure diagnostics (Sprint 4E-2E)
