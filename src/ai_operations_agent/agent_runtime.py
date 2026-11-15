@@ -26,6 +26,7 @@ from ai_operations_agent.agent_schemas import (
     ToolRequest,
 )
 from ai_operations_agent.agent_telemetry import RuntimeTrace
+from ai_operations_agent.answer_composition import CompositionStrategy, compose_answer
 from ai_operations_agent.answer_diagnostics import AnswerRejection, RejectionReason
 from ai_operations_agent.fake_model import ModelAdapter, RunScopedModelAdapter
 from ai_operations_agent.tool_schemas import (
@@ -166,6 +167,7 @@ def run_agent(
     clock: Callable[[], float] = monotonic, new_id: Callable[[], str] = lambda: uuid4().hex,
     trace: RuntimeTrace | None = None,
     evaluation_context: tools.EvaluationContext | None = None,
+    composition_strategy: CompositionStrategy = CompositionStrategy.MODEL_SELECTED,
 ) -> AgentResponse:
     """Trusted Python entry point; no HTTP endpoint, CLI, script parser, or persistence.
 
@@ -209,6 +211,10 @@ def run_agent(
         return response
 
     try:
+        if type(composition_strategy) is not CompositionStrategy:
+            raise RuntimeFailure("invalid_request")
+        if trace is not None:
+            trace.composition_strategy = composition_strategy
         if not isinstance(request, AgentRequest):
             raise RuntimeFailure("invalid_request")
         if len(_json_bytes(request.model_dump())) > limits.max_question_bytes:
@@ -231,6 +237,12 @@ def run_agent(
             if not math.isfinite(now) or now < start or now >= deadline:
                 raise RuntimeFailure("deadline_exceeded")
             return deadline - now
+
+        if (composition_strategy is CompositionStrategy.SERVER_OWNED
+                and request.workflow == "unsupported"):
+            response = _inability(run_id, ledger, "unsupported_capability")
+            remaining()
+            return finish(response)
 
         conversation = [{"role": "user", "request": request.model_dump()}]
         try:
@@ -286,6 +298,12 @@ def run_agent(
                 raise RuntimeFailure("deadline_exceeded" if turn.reason == "timeout"
                                      else "model_unavailable")
             if isinstance(turn, StructuredAnswerDraft):
+                # This strategy accepts no model-authored final draft, including a
+                # premature answer. Never repair it or substitute a composed answer.
+                if composition_strategy is CompositionStrategy.SERVER_OWNED:
+                    raise AnswerRejection(RejectionReason.INVALID_ANSWER_SELECTION)
+                if trace is not None:
+                    trace.final_model_selection_exercised = True
                 try:
                     response = _render(turn, request, ledger, discovered, assessed, target)
                     remaining()
@@ -356,6 +374,20 @@ def run_agent(
                 if source.snapshot["assessment"]["queue_id"] != target:
                     raise GroundingError("wrong assessment queue")
                 assessed = source
+            if composition_strategy is CompositionStrategy.SERVER_OWNED and (
+                request.workflow == "discovery" or assessed is not None
+            ):
+                try:
+                    draft = compose_answer(request, ledger, source_id=source.source_id, target=target)
+                    response = _render(draft, request, ledger, discovered, assessed, target)
+                    remaining()
+                    return finish(response)
+                except (AnswerRejection, RuntimeFailure):
+                    raise
+                except Exception:
+                    raise AnswerRejection(
+                        RejectionReason.INTERNAL_VALIDATION_RENDERING_FAILURE,
+                    ) from None
             conversation += [{"role": "assistant", "outcome": turn.model_dump()}, {
                 "role": "tool", "call_id": turn.call_id, "source": source.model_dump(),
                 "references": [ref.model_dump() for ref in ledger.references(source.source_id)],
