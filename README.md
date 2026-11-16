@@ -822,6 +822,18 @@ credentials, billing changes, or further live evaluation are authorized by this 
 env -u TEST_DATABASE_URL .venv/bin/python -m pytest -q tests/test_failure_diagnostics.py
 ```
 
+## Paired offline composition benchmark
+
+```bash
+.venv/bin/python -m ai_operations_agent.paired_benchmark
+```
+
+The [offline comparison](docs/OFFLINE_COMPOSITION_STRATEGY_COMPARISON.md) documents the
+22-scenario paired cohort, four unexercised final-turn attacks, per-scenario results and
+separate SDK MockTransport request counts. The runner uses private synthetic SQLite,
+requires no credentials and writes sanitized reports under ignored `evaluation-results/`.
+It has no live mode or provider configuration.
+
 ## Tests and quality checks
 
 ```bash
