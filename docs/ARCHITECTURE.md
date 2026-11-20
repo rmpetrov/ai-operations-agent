@@ -941,6 +941,103 @@ recommendation/tool expectations, precompletion attacks, validator/provenance ta
 deadlines/size/budgets, request counts and cleanup. Existing legacy tests remain unchanged.
 No historical reports or case studies are rewritten.
 
+## Deterministic cross-queue triage foundation (Sprint 5A-1)
+
+`queue_triage.triage_queues(engine, access, evaluated_at=..., policy=...)` is a trusted
+Python-only backend operation. The Engine, aware evaluation time, immutable `RiskPolicy`,
+and `AccessContext` must be supplied explicitly. There is no new agent tool, workflow,
+prompt, provider capability, CLI command, HTTP endpoint, public response version, or
+recommendation dispatch. Tool grants in `AccessContext` are unused by this backend operation;
+its queue grants and optional selected queue define its scope. Sprint 5A-2 is not implemented.
+
+### Scope and complete internal result
+
+Empty queue grants and forbidden selections fail before connection acquisition. A selected
+queue narrows the effective scope to that singleton, even if the broader grant exceeds 32.
+Otherwise all granted IDs form the effective scope. More than 32 effective IDs fail before
+database access, without truncation or sampling. Every business query has queue predicates.
+Missing unselected authorized IDs are retained separately as unavailable. A missing selected
+queue returns the same sanitized `queue unavailable` error as a forbidden selection.
+
+`triage_schemas.py` defines strict, extra-forbidden, deeply immutable internal values. A
+`QueueTriageResult` contains UTC evaluation time, `queue-triage-v1`, the common effective risk
+policy/version, scope mode/IDs, unavailable IDs, available/unavailable counts, ordered complete
+canonical assessments, positions, operational tie markers, detail eligibility, eligible count,
+detail target, and outcome. Collections are tuples, including assessment signals. Its outcomes
+are `no_available_queues`, `no_triggered_rules`, and `attention_required`. Eligibility means at
+least one triggered risk signal; the target is the first eligible ranked queue, or null.
+
+Validation rejects coerced/negative counts, invalid queue/SLA values, duplicate IDs, invalid
+scope partitions, incorrect positions/order/ties/targets, mismatched time/policy/window data,
+and omitted, duplicated, contradictory, or altered canonical signals. Unassigned count cannot
+exceed active count. Disjoint breached, at-risk, and future-created counts together cannot
+exceed active count; overlapping signal counts are never added. Future-created active tickets
+retain the existing backlog/SLA semantics and emit the bounded warning
+`future_created_active_tickets`. No configured signal is not a guarantee of operational health.
+
+### Proposed ranking policy
+
+`triage_policy.py` supplies pure lexicographic priority. Let S be severity ordinal
+(`none=0`, `low=1`, `medium=2`, `high=3`), B breached tickets, R at-risk tickets, N active
+tickets when `NO_AGENTS_ONLINE` triggered (otherwise zero), U unassigned tickets when
+`UNASSIGNED_BACKLOG` triggered (otherwise zero), and A active tickets. Sort ascending by:
+
+```text
+(-S, -B, -R, -N, -U, -A, queue_id)
+```
+
+This is a proposed operational priority policy, not an empirically validated business-impact
+ranking. Factors are compared separately, with no weighted score, unique-affected-ticket
+estimate, or sum of overlapping signals. All members sharing the six operational factors are
+marked tied; lower queue ID supplies only stable technical ordering. Absolute counts favor
+larger queues. SLA concern order precedes recorded online-agent absence and assignment backlog;
+these choices are versioned policy decisions, not predictions of urgency or capacity.
+
+### Collection and snapshot guarantees
+
+`triage_metrics.py` performs a scoped queue/SLA SELECT, computes each queue's bound UTC deadline
+and warning cutoffs with the existing integer-microsecond policy arithmetic, then performs one
+aggregate SELECT. Tickets and online agents are grouped independently before outer joins;
+empty queues get zero counts without multiplying tickets by agents. Only scalar columns and
+aggregates are selected, never ticket/agent objects, subjects, external IDs, or names.
+`evaluate_risk` is reused for each queue, and contract validation verifies its canonical output.
+The single-queue collector is not called.
+
+Business statement counts asserted on both database paths are two at 1, 8, and 32 existing
+queues, one when no scoped queue exists, and zero for rejected grants/selections/oversized
+scopes. Transaction setup statements are excluded from these counts.
+
+The explicit `read_only_session(..., snapshot=True)` mode uses PostgreSQL REPEATABLE READ,
+`SET TRANSACTION READ ONLY`, and the existing bounded statement timeout. SQLite enables
+`query_only`, issues BEGIN if the driver has not started a transaction, and verifies the real
+driver `in_transaction` state before business reads. SQLAlchemy's transaction object alone is
+not treated as proof of a SQLite read transaction. Existing callers retain Read Committed and
+their existing SQLite setup by default. The SELECT-only guard, disabled autoflush, blocked
+flush/commit, rollback, PRAGMA restoration, and connection invalidation safeguards remain.
+The session and transaction close immediately after scalar collection, before pure risk
+evaluation/ranking or returning a result, including failure paths.
+
+`test_triage_snapshot.py` interleaves an independent committed writer between metadata and
+aggregate reads. PostgreSQL and file-backed SQLite WAL tests verify that SLA, ticket, and agent
+facts remain from the first snapshot; a subsequent operation observes all committed changes.
+Native DBAPI write rejection is checked in addition to Python guards. Fixture writes occur
+outside triage and are confined to owned synthetic test rows/databases.
+
+The snapshot reflects data visible at the database read, not a historical reconstruction at
+the supplied evaluation time. Existing age-based SLA and recorded-presence limitations apply.
+There is no whole-operation hard cancellation or SQLite statement timeout. No ranking consumes
+model-generated data, and no model/provider behavior, performance, or cost is established.
+Models, migrations, existing risk/recommendation rules, tools/runtime, provider/live runner,
+public contracts, original 26 scenarios, composition, and historical evidence remain unchanged.
+
+Validation on 2026-11-19: the 98 new cases yielded 96 passes and two PostgreSQL-only skips in
+the focused SQLite run. The complete SQLite and isolated PostgreSQL 16.15 suites each yielded
+1,220 passes and four dialect-specific skips. PostgreSQL was exercised with `TEST_DATABASE_URL`
+against fresh migrated temporary infrastructure, with zero business rows afterward; all owned
+containers and tmpfs storage were removed. The original 26-scenario evaluator passed 26/26 with
+zero provider requests or operational write attempts. Ruff and whitespace checks passed.
+The suites retain the existing Starlette/httpx deprecation warning.
+
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.
