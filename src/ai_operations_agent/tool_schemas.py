@@ -13,6 +13,8 @@ from ai_operations_agent.schemas import (
 )
 
 ToolName = Literal["list_queues", "get_queue_recommendations"]
+# Keep ToolName as the v1 evidence/provider contract. Internal grants are broader.
+InternalToolName = Literal["list_queues", "get_queue_recommendations", "get_queue_triage"]
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 
 
@@ -30,7 +32,7 @@ class AccessContext(StrictValue):
     """Construct only in trusted server code, never from a question or tool arguments."""
 
     allowed_queue_ids: frozenset[PositiveInt] = frozenset()
-    allowed_tool_names: frozenset[ToolName] = frozenset()
+    allowed_tool_names: frozenset[InternalToolName] = frozenset()
     selected_queue_id: PositiveInt | None = None
     limits: ExecutionLimits = Field(default_factory=ExecutionLimits)
 
