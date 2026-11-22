@@ -948,7 +948,8 @@ Python-only backend operation. The Engine, aware evaluation time, immutable `Ris
 and `AccessContext` must be supplied explicitly. There is no new agent tool, workflow,
 prompt, provider capability, CLI command, HTTP endpoint, public response version, or
 recommendation dispatch. Tool grants in `AccessContext` are unused by this backend operation;
-its queue grants and optional selected queue define its scope. Sprint 5A-2 is not implemented.
+its queue grants and optional selected queue define its scope. The separate Sprint 5A-2
+internal tool and evidence boundary are described below.
 
 ### Scope and complete internal result
 
@@ -1037,6 +1038,94 @@ against fresh migrated temporary infrastructure, with zero business rows afterwa
 containers and tmpfs storage were removed. The original 26-scenario evaluator passed 26/26 with
 zero provider requests or operational write attempts. Ruff and whitespace checks passed.
 The suites retain the existing Starlette/httpx deprecation warning.
+
+## Cross-queue triage tool and evidence contracts (Sprint 5A-2)
+
+This offline-only preparation adds an internal tool and independently validated v2 evidence.
+Existing public agent workflows do **not** support cross-queue triage. There is no new workflow,
+model turn, prompt, provider definition, CLI command, HTTP endpoint, or recommendation dispatch.
+
+### Trusted tool boundary
+
+`tools.execute_tool("get_queue_triage", {}, access, engine=engine,
+evaluation_context=EvaluationContext(utc_time, risk_policy))` accepts exactly an empty JSON
+object, either as a dictionary or JSON string. Extra fields, filters, queue IDs, authorization,
+weights, policy/time/connection overrides, duplicate JSON keys, invalid types and oversized
+arguments are rejected. The explicit SQLAlchemy `Engine`, validated `AccessContext`, exact
+`get_queue_triage` grant, UTC timestamp and immutable `RiskPolicy` come from trusted local code.
+No ambient engine, clock, policy, credentials or provider settings are consulted on this path.
+Authorization, selected-queue narrowing and the 32-effective-queue limit precede connections.
+
+The boundary calls the existing `triage_queues` engine without new SQL or ranking/risk rules.
+It retains native read-only snapshot enforcement and closes all business sessions/transactions
+before result serialization or evidence construction. The full `QueueTriageResult` is strictly
+revalidated, then checked against the trusted effective scope, time and policy. Its complete,
+detached JSON uses sorted keys, compact separators and UTF-8. `max_result_bytes` is checked
+atomically against that encoding; failure yields a fixed sanitized error without partial
+results, truncation, SQL, names, private values or exception text. Expected engine/database
+failures map to fixed `ToolError` messages.
+
+`ToolName` remains the two-name v1 source/provider type. `InternalToolName` permits the triage
+grant in trusted access contexts. `SUPPORTED_TOOLS`, provider argument mappings, permitted
+runtime transitions and `offline-agent-v1` schemas retain their original two tools. Merely
+receiving a triage grant cannot let a legacy model dispatch it.
+
+### Separate immutable v2 evidence
+
+[`triage_agent_schemas.py`](../src/ai_operations_agent/triage_agent_schemas.py) and
+[`triage_evidence.py`](../src/ai_operations_agent/triage_evidence.py) define strict,
+extra-forbidden `triage-evidence-v2` sources and `offline-agent-v2` responses. Capture converts
+a strictly validated triage tool snapshot losslessly into `{summary, queues}`: `summary`
+contains every `QueueTriageResult` field except `rankings`, and `queues` contains those complete
+ranked rows. These real JSON locations give the canonical reference order:
+
+1. `triage_summary` at `/summary`, with `queue_id: null` (scope-level evidence).
+2. Exactly one `triage_queue` at `/queues/0`, `/queues/1`, etc., in canonical ranking order,
+   each with the corresponding positive queue ID.
+3. If linked detail exists, `assessment` at `/assessment`, then every `recommendation` at
+   `/recommendations/0`, etc., in canonical catalog order, all with the fixed target queue ID.
+
+Summary evidence remains required when no ranked queues are available. Reconstructing the
+strict `QueueTriageResult` independently validates partitions, counts, positions, ties,
+assessments, signals, common UTC time/policy, eligibility, first eligible target and outcome.
+No missing operational values are inferred. Capture additionally requires exact equality with
+trusted authorization, evaluation time and policy. Source snapshots have immutable nested
+values and tuples; the private ledger retains detached serialized captures. Independent
+response validation proves canonical self-consistency; `TriageEvidenceLedger.validate` also
+requires equality with the private captures to prove provenance. Self-consistency alone cannot
+establish that a snapshot was actually captured from an authorized dispatch.
+
+The v2 selection path allows 38 references: summary + 32 rows + one linked assessment + four
+recommendations. The v1 draft limit remains 32. V2 permits at most two sources, 131,072 UTF-8
+bytes per complete source, and 524,288 bytes per complete response, with bounded explanations.
+Capture also respects the trusted tool result limit. Wrong versions/source kinds, missing,
+duplicate, reordered, cross-run, unauthorized or forged evidence fail closed; invalid sources
+are never silently dropped, normalized into validity or replaced. V1 and v2 validators reject
+sources and responses passed through the wrong contract.
+
+### Optional linked detail and response rendering
+
+A future `get_queue_recommendations` snapshot may be captured only with a separate trusted
+recommendation grant, in the same run, after its triage parent. The explicit parent source ID
+must match. Its queue must equal the server-fixed **first eligible** triage target; another
+authorized queue is invalid. Its complete canonical assessment must equal the triage row
+exactly, including identity, metrics, signals, time and policy. All canonical recommendations,
+including text, evidence, membership and order, are required. A second detail source is
+rejected. Validation uses detached snapshots and the pure existing recommendation catalog;
+it never rereads the database, reassesses, retries, repairs or dispatches another tool.
+
+The pure trusted test builder renders fixed, evidence-checked explanation blocks for the
+scope summary, every ranked queue, optional recommendations, empty scope and no triggered
+rules. It preserves the v1 statuses and strict read-only/advisory/human-review flags. Failure
+and inability responses carry only fixed sanitized text: no snapshots, evidence, partial
+operational conclusions or arbitrary model-authored claims. Canonical JSON comparison keeps
+booleans, integers and floating-point evidence distinct.
+
+Sprint 5B must separately implement private captured-context dispatch and runtime continuation.
+Neither is implemented or authorized here. Current validation establishes deterministic offline
+contracts, not real-model behavior, billing, historical reconstruction, business-impact ranking,
+authentication or a least-privilege database role. Existing snapshot/risk limitations still apply.
+No live execution, credential provisioning, `.env` edits, operational writes or deployment occur.
 
 ## Future work (not implemented)
 

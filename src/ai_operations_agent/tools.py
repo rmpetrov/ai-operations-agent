@@ -1,8 +1,8 @@
-"""Exactly two internal read-only tools, with no provider, runtime, CLI, or agent API."""
+"""Read-only tools; triage is internal-only and absent from legacy agent capabilities."""
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
@@ -12,7 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from ai_operations_agent import queue_services
 from ai_operations_agent.clock import get_evaluation_time
 from ai_operations_agent.config import get_risk_policy
-from ai_operations_agent.read_only import read_only_session
+from ai_operations_agent.read_only import ReadOnlyViolation, read_only_session
 from ai_operations_agent.risk import RiskPolicy
 from ai_operations_agent.tool_schemas import (
     AccessContext,
@@ -23,6 +23,7 @@ from ai_operations_agent.tool_schemas import (
 )
 
 SUPPORTED_TOOLS = frozenset({"list_queues", "get_queue_recommendations"})
+INTERNAL_TOOLS = SUPPORTED_TOOLS | {"get_queue_triage"}
 _QUEUE_LIST = TypeAdapter(list[QueueIdentity])
 
 
@@ -76,6 +77,8 @@ def execute_tool(
     `access` and the optional engine are supplied exclusively by trusted server code.
     No permissions, clock, policy, SQL, or connection can come from tool arguments.
     """
+    if type(name) is str and name == "get_queue_triage":
+        return _execute_triage(arguments, access, engine, evaluation_context)
     if type(name) is not str or name not in SUPPORTED_TOOLS:
         raise ToolError("unsupported tool")
     if not isinstance(access, AccessContext):
@@ -140,4 +143,66 @@ def execute_tool(
     except SQLAlchemyError:
         raise ToolError("database unavailable") from None
     except ValidationError:
+        raise ToolError("invalid tool result") from None
+
+
+def _execute_triage(arguments, access, engine, evaluation_context):
+    # The legacy dispatch path and its defaults above deliberately remain unchanged.
+    from ai_operations_agent.queue_triage import TriageError, effective_triage_scope, triage_queues
+    from ai_operations_agent.triage_schemas import QueueTriageResult
+
+    try:
+        if type(access) is not AccessContext:
+            raise ToolError("tool access denied")
+        access = AccessContext.model_validate(access.model_dump(), strict=True)
+        if "get_queue_triage" not in access.allowed_tool_names:
+            raise ToolError("tool access denied")
+        scope = effective_triage_scope(access)
+    except (ValidationError, TypeError, AttributeError):
+        raise ToolError("tool access denied") from None
+    except TriageError as exc:
+        message = str(exc)
+        raise ToolError(message if message in {
+            "tool access denied", "queue unavailable", "triage scope exceeds limit",
+        } else "tool access denied") from None
+    payload = _arguments(arguments, access.limits.max_argument_bytes)
+    try:
+        ListQueuesArguments.model_validate(payload, strict=True)
+    except (ValidationError, ValueError, RecursionError):
+        raise ToolError("invalid tool arguments") from None
+    try:
+        if not isinstance(engine, Engine):
+            raise ValueError
+        if type(evaluation_context) is not EvaluationContext:
+            raise ValueError
+        when, policy = evaluation_context.evaluated_at, evaluation_context.policy
+        if (type(when) is not datetime or when.utcoffset() != timedelta(0)
+                or type(policy) is not RiskPolicy):
+            raise ValueError
+        policy = RiskPolicy(policy.sla_remaining_percent, policy.unassigned_min_tickets)
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        raise ToolError("invalid triage context") from None
+    try:
+        # Owns a native read-only snapshot and closes it before serialization/validation.
+        result = triage_queues(engine, access, evaluated_at=when, policy=policy)
+        validated = QueueTriageResult.model_validate_json(result.model_dump_json(), strict=True)
+        if (validated.scope != scope or validated.evaluated_at != when
+                or validated.risk_policy.risk_policy() != policy):
+            raise ToolError("invalid tool result")
+        encoded = json.dumps(validated.model_dump(mode="json"), sort_keys=True,
+                             ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > access.limits.max_result_bytes:
+            raise ToolError("tool result exceeds size limit")
+        return json.loads(encoded)
+    except TriageError as exc:
+        messages = {
+            "queue unavailable": "queue unavailable", "database unavailable": "database unavailable",
+            "invalid triage data": "invalid tool result", "invalid triage policy": "invalid triage context",
+        }
+        raise ToolError(messages.get(str(exc), "invalid tool result")) from None
+    except (SQLAlchemyError, ReadOnlyViolation):
+        raise ToolError("database unavailable") from None
+    except ToolError:
+        raise
+    except (ValueError, TypeError, AttributeError, OverflowError, RecursionError):
         raise ToolError("invalid tool result") from None
