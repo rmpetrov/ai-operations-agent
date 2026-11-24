@@ -54,9 +54,20 @@ def _json(value) -> str:
     )
 
 
+class TriageSizeError(GroundingError):
+    """Atomic size rejection, including inside nested Pydantic validators."""
+
+
+def _raise_if_size_error(error: ValidationError):
+    for issue in error.errors(include_input=False, include_url=False):
+        if (issue["type"] in {"triage_size_limit", "too_long"}
+                or isinstance(issue.get("ctx", {}).get("error"), TriageSizeError)):
+            raise TriageSizeError("evidence exceeds size limit") from None
+
+
 def _check_size(payload: str, maximum: int):
     if len(payload.encode("utf-8")) > maximum:
-        raise GroundingError("evidence exceeds size limit")
+        raise TriageSizeError("evidence exceeds size limit")
 
 
 def _canonical_sources(sources, run_id):
@@ -124,7 +135,7 @@ def canonical_triage_evidence(sources, run_id) -> tuple[TriageEvidenceItem, ...]
                 )
             )
     if len(items) > MAX_REFERENCES:
-        raise GroundingError("too many evidence references")
+        raise TriageSizeError("too many evidence references")
     return tuple(items)
 
 
@@ -238,6 +249,9 @@ def _validate_triage_response_contract(response):
             raise GroundingError("noncanonical explanation")
     except GroundingError:
         raise
+    except ValidationError as exc:
+        _raise_if_size_error(exc)
+        raise GroundingError("invalid triage evidence") from None
     except (ValueError, TypeError, AttributeError, KeyError, OverflowError, RecursionError):
         raise GroundingError("invalid triage evidence") from None
 
@@ -255,6 +269,9 @@ def validate_triage_response(response):
         TriageAgentResponse.model_validate(response, strict=True)
     except GroundingError:
         raise
+    except ValidationError as exc:
+        _raise_if_size_error(exc)
+        raise GroundingError("invalid triage response") from None
     except (ValueError, TypeError, AttributeError, KeyError, OverflowError, RecursionError):
         raise GroundingError("invalid triage response") from None
 
@@ -294,10 +311,23 @@ class TriageEvidenceLedger:
         self._new_id = new_id
         # Store private serialized values, never caller-owned dictionaries or models.
         self._sources: list[str] = []
+        self._detail_claimed = False
 
     @property
     def sources(self):
         return tuple(_SOURCE.validate_json(payload, strict=True) for payload in self._sources)
+
+    def claim_detail_parent(self, parent_id: str, parent_json: str) -> TriageSource:
+        """Spend the current private capture once, even if a continuation record was copied."""
+        if (self._detail_claimed or self._sources != [parent_json]
+                or "get_queue_recommendations" not in self._access.allowed_tool_names):
+            raise GroundingError("invalid continuation parent")
+        parent, = self.sources
+        if (type(parent) is not TriageSource or parent.run_id != self.run_id
+                or parent.source_id != parent_id):
+            raise GroundingError("invalid continuation parent")
+        self._detail_claimed = True
+        return parent
 
     def capture(self, name: str, snapshot: dict, *, parent_triage_source_id: str | None = None):
         """Capture detached canonical synthetic/tool results. No extra reads are authorized."""
@@ -349,6 +379,9 @@ class TriageEvidenceLedger:
             return source
         except GroundingError:
             raise
+        except ValidationError as exc:
+            _raise_if_size_error(exc)
+            raise GroundingError("invalid triage source") from None
         except (ValueError, TypeError, AttributeError, KeyError, OverflowError, RecursionError):
             raise GroundingError("invalid triage source") from None
 
@@ -370,7 +403,7 @@ class TriageEvidenceLedger:
 
 
 def build_triage_answer(ledger: TriageEvidenceLedger, selection: TriageSelection | None = None):
-    """Pure trusted test builder; deliberately absent from run_agent and model adapters."""
+    """Compose from private captures; model adapters never select or author these facts."""
     try:
         sources = ledger.sources
         evidence = canonical_triage_evidence(sources, ledger.run_id)
@@ -389,7 +422,12 @@ def build_triage_answer(ledger: TriageEvidenceLedger, selection: TriageSelection
         )
         ledger.validate(response)
         return response
-    except (GroundingError, ValidationError, TypeError, ValueError, AttributeError, RecursionError):
+    except TriageSizeError:
+        raise
+    except ValidationError as exc:
+        _raise_if_size_error(exc)
+        raise GroundingError("invalid triage answer") from None
+    except (GroundingError, TypeError, ValueError, AttributeError, RecursionError):
         # No partial response, retries, repair, fresh assessment, or alternate execution.
         raise GroundingError("invalid triage answer") from None
 

@@ -1042,8 +1042,8 @@ The suites retain the existing Starlette/httpx deprecation warning.
 ## Cross-queue triage tool and evidence contracts (Sprint 5A-2)
 
 This offline-only preparation adds an internal tool and independently validated v2 evidence.
-Existing public agent workflows do **not** support cross-queue triage. There is no new workflow,
-model turn, prompt, provider definition, CLI command, HTTP endpoint, or recommendation dispatch.
+Sprint 5A-2 exposed the tool to trusted backend code. The separate agent workflow arrived in
+Sprint 5B-1, described below.
 
 ### Trusted tool boundary
 
@@ -1121,11 +1121,80 @@ and inability responses carry only fixed sanitized text: no snapshots, evidence,
 operational conclusions or arbitrary model-authored claims. Canonical JSON comparison keeps
 booleans, integers and floating-point evidence distinct.
 
-Sprint 5B must separately implement private captured-context dispatch and runtime continuation.
-Neither is implemented or authorized here. Current validation establishes deterministic offline
-contracts, not real-model behavior, billing, historical reconstruction, business-impact ranking,
-authentication or a least-privilege database role. Existing snapshot/risk limitations still apply.
-No live execution, credential provisioning, `.env` edits, operational writes or deployment occur.
+Sprint 5A-2 verified these contracts offline. The existing snapshot and risk limitations apply.
+
+## Offline multi-step cross-queue triage runtime (Sprint 5B-1)
+
+Trusted Python callers invoke `run_triage_agent(request, access, *, engine, evaluation_context,
+limits=None, trace=None)`. The strict, frozen request requires `schema_version="offline-agent-v2"`,
+`workflow="cross_queue_triage"`, a Boolean `include_recommendations`, and a nonempty question
+of at most 4,096 characters. The complete request must also fit its UTF-8 budget. Preflight
+revalidates request, limits and permissions, checks the explicit engine and requires a UTC
+evaluation time and validated risk policy. A selected authorized queue narrows the effective
+scope to one before the 32-ID cap applies. [Runtime](../src/ai_operations_agent/triage_agent_runtime.py)
+and [request/response contracts](../src/ai_operations_agent/triage_agent_schemas.py).
+
+| State | Permitted proposal or operation | Successor |
+|---|---|---|
+| Preflight | Validate trusted inputs, nonempty scope and triage grant | Initial proposal |
+| Initial proposal | One fresh `get_queue_triage({})` | Database snapshot dispatch |
+| Snapshot dispatch | Existing authorized read-only tool in one owned transaction | Parent capture |
+| Parent capture | Capture complete result into the current private ledger | Compose if detail is off or target is null. Otherwise require the detail grant and remaining model/tool budgets |
+| Detail proposal | One fresh `get_queue_recommendations` with exactly the server-fixed positive integer `queue_id` | Snapshot-derived dispatch |
+| Snapshot-derived dispatch | Consume the current parent's captured assessment once | Linked capture |
+| Linked capture | Validate complete detail and its explicit parent link | Compose |
+| Compose | Build canonical blocks and evidence from the private ledger | Check completeness, public contract and private provenance |
+| Release | Enforce final byte and time budgets, including adapter cleanup | Answered |
+
+Each execution creates a fresh offline sequencer. Its detached control record contains the stage
+and, on the second proposal, the numeric ID of the first eligible ranked queue. Question text,
+queue names, raw snapshots and permissions never enter the adapter. A proposal must match the
+current tool, argument contract, grant and target. A malformed, batched, repeated, reordered or
+refused turn terminates the run. The application always owns composition. The trusted entry
+point exposes no adapter, strategy, transport or network callback.
+
+The continuation pins the run ID, parent source ID and serialized parent, effective scope,
+target, deadline and single-use state. It resolves the parent again from the private ledger and
+uses the captured metrics, warning window, policy and complete risk evaluation with the existing
+recommendation catalog. The detached result passes the canonical envelope checks and result
+budget before linked capture. Changes committed after the first transaction closes cannot
+alter the recommendations. The standalone recommendation tool retains its fresh-read semantics.
+
+A successful detail workflow makes two model attempts, accepts two proposals and dispatches
+two logical tools. Triage-only and no-target workflows take one of each. Every successful path
+uses one database snapshot, normally containing two business SELECTs (one when no queues
+exist). Detail and composition use zero SQL, sessions and checkouts. There is no final model
+turn. The [request-local trace](../src/ai_operations_agent/triage_agent_telemetry.py) records
+fixed stage, tool, reason and outcome labels. The dispatch and completion events distinguish an
+attempted snapshot read from a completed one. It carries no argument values, operational data
+or provider usage.
+
+The candidate returned by the composer passes three release gates. The workflow requires
+exactly the pinned parent, plus its linked detail whenever requested and eligible. The public
+validator verifies the v2 contract and canonical evidence. The private ledger independently
+checks the candidate against the captured sources for this run. A valid parent-only answer
+cannot complete a required-detail workflow. A nonempty unselected grant with no available
+rows, or a snapshot with no triggered rules, can complete without the detail grant.
+
+Every failure discards operational conclusions and returns the canonical v2 inability block.
+Missing grants, invalid scope and wrong targets produce `access_denied`. Invalid requests,
+proposals, evidence and rendering produce `invalid_evidence`. Unavailable operations, refusal,
+expired deadlines and exhausted operation budgets produce `tool_unavailable`. Oversize
+payloads produce `size_limit`. All four outcomes have empty sources, evidence and uncertainty.
+
+Default UTF-8 limits are 4,096 bytes per request and argument object, 8,192 per turn, 196,608
+per conversation, and 65,536 per logical result. Capture also limits raw evidence and each
+wrapped source to 131,072 bytes. The complete response must fit the smaller of the runtime
+limit (default 196,608) and the v2 hard limit (524,288). Two sources and 38 references are the
+v2 maxima. Overflow rejects the entire result. The absolute monotonic deadline brackets each
+model, dispatch, capture, composition and validation operation. The PostgreSQL statement
+timeout is capped by the remaining time. Synchronous database waits, SQLite statements and
+Python work can finish after expiry: the runtime rejects the late result once it regains
+control. There is no hard cancellation.
+
+The [integration cohort](../tests/test_triage_agent_runtime.py) exercises a deterministic
+local script using synthetic data. It measures neither live-model performance nor billing.
+The independent versioned v2 evaluation suite is deferred to Sprint 5C.
 
 ## Future work (not implemented)
 
