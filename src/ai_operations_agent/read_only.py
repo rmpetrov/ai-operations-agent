@@ -7,7 +7,12 @@ from sqlalchemy import event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from ai_operations_agent.db import get_engine
+
+def get_engine() -> Engine:
+    # Importing the explicit-engine snapshot path must not load local settings.
+    from ai_operations_agent.db import get_engine as configured_engine
+
+    return configured_engine()
 
 
 class ReadOnlyViolation(RuntimeError):

@@ -11,7 +11,6 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ai_operations_agent import queue_services
 from ai_operations_agent.clock import get_evaluation_time
-from ai_operations_agent.config import get_risk_policy
 from ai_operations_agent.read_only import ReadOnlyViolation, read_only_session
 from ai_operations_agent.risk import RiskPolicy
 from ai_operations_agent.tool_schemas import (
@@ -25,6 +24,13 @@ from ai_operations_agent.tool_schemas import (
 SUPPORTED_TOOLS = frozenset({"list_queues", "get_queue_recommendations"})
 INTERNAL_TOOLS = SUPPORTED_TOOLS | {"get_queue_triage"}
 _QUEUE_LIST = TypeAdapter(list[QueueIdentity])
+
+
+def get_risk_policy() -> RiskPolicy:
+    # Only legacy fresh assessments consult the application settings.
+    from ai_operations_agent.config import get_risk_policy as configured_policy
+
+    return configured_policy()
 
 
 class ToolError(ValueError):

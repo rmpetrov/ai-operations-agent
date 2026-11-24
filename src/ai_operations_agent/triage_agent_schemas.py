@@ -1,4 +1,4 @@
-"""Bounded offline-agent-v2 contracts. No model turn or runtime integration."""
+"""Bounded offline-agent-v2 contracts. Trusted request and evidence-backed responses."""
 
 import json
 from typing import Annotated, Literal
@@ -12,6 +12,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic_core import PydanticCustomError
 
 from ai_operations_agent.agent_schemas import Identifier, Status
 from ai_operations_agent.recommendations import build_recommendations
@@ -33,6 +34,13 @@ MAX_SOURCES = 2
 MAX_REFERENCES = 38  # summary + 32 queues + one linked assessment + four recommendations
 MAX_SOURCE_BYTES = 131072
 MAX_RESPONSE_BYTES = 524288
+
+
+class TriageAgentRequest(InternalValue):
+    schema_version: Literal["offline-agent-v2"]
+    workflow: Literal["cross_queue_triage"]
+    include_recommendations: bool = Field(strict=True)
+    question: str = Field(min_length=1, max_length=4096)
 
 
 def _reject_hidden_fields(value):
@@ -82,6 +90,18 @@ class TriageSnapshot(InternalValue):
 _RECOMMENDATIONS = TypeAdapter(tuple[ActionRecommendation, ...])
 
 
+def recommendations_for_assessment(a: TriageAssessment):
+    return build_recommendations(
+        a.metrics.risk_metrics(),
+        TriageRiskPolicy(
+            sla_at_risk_remaining_percent=a.policy.sla_at_risk_remaining_percent,
+            unassigned_backlog_min_tickets=a.policy.unassigned_backlog_min_tickets,
+        ).risk_policy(),
+        a.policy.sla_at_risk_window_seconds,
+        a.risk_evaluation(),
+    )
+
+
 class LinkedDetailSnapshot(InternalValue):
     recommendation_policy_version: Literal["queue-recommendations-v1"]
     advisory_only: Literal[True]
@@ -108,16 +128,7 @@ class LinkedDetailSnapshot(InternalValue):
     def canonical_recommendations(self):
         _reject_hidden_fields(self)
         QueueRecommendationsResult.model_validate_json(self.model_dump_json(), strict=True)
-        a = self.assessment
-        expected = build_recommendations(
-            a.metrics.risk_metrics(),
-            TriageRiskPolicy(
-                sla_at_risk_remaining_percent=a.policy.sla_at_risk_remaining_percent,
-                unassigned_backlog_min_tickets=a.policy.unassigned_backlog_min_tickets,
-            ).risk_policy(),
-            a.policy.sla_at_risk_window_seconds,
-            a.risk_evaluation(),
-        )
+        expected = recommendations_for_assessment(self.assessment)
         if tuple(r.model_dump(mode="json") for r in self.recommendations) != tuple(
             r.model_dump(mode="json") for r in expected
         ):
@@ -130,7 +141,7 @@ class BoundedEvidenceSource(InternalValue):
     def bounded_snapshot(self):
         _reject_hidden_fields(self)
         if len(self.model_dump_json().encode("utf-8")) > MAX_SOURCE_BYTES:
-            raise ValueError("source exceeds size limit")
+            raise PydanticCustomError("triage_size_limit", "source exceeds size limit")
         return self
 
 
