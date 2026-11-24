@@ -834,6 +834,20 @@ separate SDK MockTransport request counts. The runner uses private synthetic SQL
 requires no credentials and writes sanitized reports under ignored `evaluation-results/`.
 It has no live mode or provider configuration.
 
+## Independent offline cross-queue triage evaluation
+
+The 32-scenario evaluation checks queue rankings, authorized detail targets, evidence links,
+atomic failures and the database work behind each answer. Run it from the repository root
+to write per-scenario JSON and Markdown under `evaluation-results/triage/`.
+
+```bash
+.venv/bin/python -m ai_operations_agent.triage_evaluation
+```
+
+The evaluator uses a fresh synthetic in-memory SQLite database per case and a scripted
+adapter. The case study includes measured results and a byte-for-byte reproduction check.
+[Offline triage workflow case study](docs/OFFLINE_TRIAGE_WORKFLOW_CASE_STUDY.md)
+
 ## Tests and quality checks
 
 ```bash
