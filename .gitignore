@@ -12,3 +12,12 @@ evaluation-results/
 .DS_Store
 .idea/
 .vscode/
+
+# OpsPilot local synthetic recordings, compiler inputs and review output
+frontend/replay-input/
+frontend/.generated/
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+frontend/review/
