@@ -1196,6 +1196,49 @@ The [integration cohort](../tests/test_triage_agent_runtime.py) exercises a dete
 local script using synthetic data. It measures neither live-model performance nor billing.
 The independent versioned v2 evaluation suite is deferred to Sprint 5C.
 
+## OpsPilot static replay (Sprint 6B-1)
+
+OpsPilot packages two independent recordings of the **Combined incident** scenario.
+Each Python execution owns a private in-memory SQLite engine and resolves the queue
+grants from inserted synthetic rows. The fixture fixes business time at
+`2026-10-31T16:00:00Z`. The exporter supplies the request, authorization, evaluation
+context, limits and request-local trace to `run_triage_agent`. The first workflow asks
+for triage only. The second requests recommendations for the runtime-selected target.
+The scripted adapter, ranking, recommendation catalog and private provenance check
+are the existing offline workflow. Each fixture is disposed after capture.
+
+The `opspilot-run-v1` envelope preserves the released `offline-agent-v2` response.
+Dashboard totals sum the five corresponding metrics over available rows of its parent
+triage snapshot. This keeps the displayed queue order, target, evidence and totals
+tied to the same authorized read. Empty or failed responses expose no totals.
+Recommendations and JSON pointers are retained in their returned order. A pointer is
+relative to its source snapshot. The detail source's parent ID identifies the original
+triage capture. Browser inspection reads released evidence. The private ledger check
+takes place inside Python before release.
+
+The trace contains the runtime's allowlisted events in emission order. Counters marked
+`runtime_trace` count event entries. Snapshot dispatch and snapshot completion have
+distinct events, and snapshot-derived detail is a separate logical dispatch.
+Physical SQL and checkout counts require independent database instrumentation. The
+[workflow evaluation](OFFLINE_TRIAGE_WORKFLOW_CASE_STUDY.md) reports those measurements
+for its own scenarios. The recordings establish neither provider latency, usage, cost
+nor production reliability. Recorded online presence describes status at the fixed
+evaluation time and cannot establish staffing capacity.
+
+The static `opspilot-catalog-v1` manifest identifies each scenario/workflow pair and
+supplies a relative asset path and SHA-256 of the recorded bytes. Source revision and
+working-tree state describe the implementation used during capture. The dataset digest
+identifies the fixed fixture input. These separate values support review even when
+fresh run and source IDs change between exports. The asset digest checks consistency
+with the trusted catalog. Someone who replaces both files can supply matching hashes.
+
+The frontend builds locally using TypeScript declarations derived from Python JSON Schema.
+The asset loader separately verifies bounded runtime input, versions, selected identities,
+permitted local paths and SHA-256. Changing the workflow clears the current result and
+its evidence selection. Superseded requests cannot restore an old result. The preview
+serves only compiled assets and curated recordings over loopback. No FastAPI application,
+execution endpoint, development database, provider, or natural-language routing is involved.
+
 ## Future work (not implemented)
 
 - SLA policy calendars, per-ticket effective due timestamps, reassignment audit history.

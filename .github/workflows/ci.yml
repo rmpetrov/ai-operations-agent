@@ -70,3 +70,36 @@ jobs:
           if docker container inspect "$CI_POSTGRES_CONTAINER" >/dev/null 2>&1; then
             docker rm --force "$CI_POSTGRES_CONTAINER"
           fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.0"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Prepare recorded runs with the offline runtime
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e .
+          .venv/bin/python -m ai_operations_agent.demo_replay
+      - name: Install locked frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Verify contracts and component behavior
+        working-directory: frontend
+        run: |
+          npm run contracts:check
+          npm run typecheck
+          npm test
+      - name: Build and test the static distribution
+        working-directory: frontend
+        run: |
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:e2e

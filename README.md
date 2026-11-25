@@ -4,7 +4,59 @@ A backend-first learning project: build the deterministic operations system **be
 introducing LLM agents. The first version models support queues, human operators,
 and tickets, with a small metrics API and repeatable tests.
 
-> **Status:** Sprint 4E-2G — offline analysis of operator-reported synthetic live results: one discovery PASS and five queue assessments, with two PASS outcomes, two final-answer validation failures, and one provider/adapter failure with unknown root cause. Production reliability is not demonstrated. Discovery remains the default; each public execution mode selects one synthetic scenario with at most two provider requests. Further live execution and credential provisioning require separate human approval. The offline evaluation harness and CLI remain available. Local development only; no authentication or public deployment.
+## OpsPilot static replay
+
+Open the Combined incident workspace to inspect a recorded cross-queue triage decision.
+Choose triage only or triage with recommendations, then select **Open recorded run**.
+The dashboard shows the two authorized queues at the fixed evaluation time. Follow an
+action's evidence to its captured JSON and parent snapshot, or inspect the recorded
+sequence of tool requests and validation steps.
+
+Prepare the two recordings and build the frontend from the Git checkout root with Python 3.11+ and Node 22.22.0.
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/python -m ai_operations_agent.demo_replay
+cd frontend
+npm ci
+npm run build
+npm run preview
+```
+
+Open `http://127.0.0.1:4173`. The preview serves only the built
+distribution. Python is needed during preparation. Opening a recording afterward
+loads local static files. The exporter uses disposable synthetic in-memory SQLite,
+with no Docker, database URL, API key or running FastAPI application required.
+The browser has no execution endpoint or connection to a model provider.
+
+The frontend checks use the prepared recordings. Run them in `frontend/`.
+After a deliberate Python contract edit, `npm run contracts` regenerates the TypeScript
+declarations. The drift check compares them against fresh Python serialization schemas.
+Playwright saves desktop and tablet screenshots under the ignored `frontend/review/`.
+
+For a source review ZIP, the included distribution can be opened with Node alone by
+running `node frontend/scripts/serve.mjs` from its extracted root. To generate new
+recordings with Git provenance, apply the source to a checkout of the reviewed baseline.
+
+```bash
+npm run contracts:check
+npm run typecheck
+npm test
+npm run build
+npx playwright install chromium
+npm run test:e2e
+```
+
+Dependency and browser installation require development-time downloads on a fresh machine.
+Runtime trace counters describe recorded stages. Physical SQL counts, connection checkouts
+and provider latency are unmeasured in a replay. The independent workflow evaluation
+documents its own measurements. [Replay architecture](docs/ARCHITECTURE.md#opspilot-static-replay-sprint-6b-1)
+· [Offline triage workflow case study](docs/OFFLINE_TRIAGE_WORKFLOW_CASE_STUDY.md)
+
+## Historical live experiments
+
+> **Sprint 4E-2G** — offline analysis of operator-reported synthetic live results: one discovery PASS and five queue assessments, with two PASS outcomes, two final-answer validation failures, and one provider/adapter failure with unknown root cause. Production reliability is not demonstrated. Discovery remains the default; each public execution mode selects one synthetic scenario with at most two provider requests. Further live execution and credential provisioning require separate human approval. The offline evaluation harness and CLI remain available. Local development only; no authentication or public deployment.
 
 ## Engineering case studies
 
